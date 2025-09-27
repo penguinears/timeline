@@ -3,292 +3,615 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Moments — Star Program</title>
+  <title>Moments — Star Program (Enhanced)</title>
+
+  <!-- Tailwind CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Google Font -->
+  <link rel="preconnect" href="https://fonts.gstatic.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&display=swap" rel="stylesheet">
+
+  <!-- React + Babel -->
   <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <style>
+    body { font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; }
+    .fade-enter { opacity: 0; transform: translateY(6px); }
+    .fade-enter-active { opacity: 1; transform: translateY(0); transition: opacity .25s, transform .25s; }
+    .fade-leave { opacity: 1; transform: translateY(0); }
+    .fade-leave-active { opacity: 0; transform: translateY(6px); transition: opacity .25s, transform .25s; }
+  </style>
 </head>
-<body class="bg-slate-100">
+<body class="bg-slate-100 text-slate-800">
   <div id="root"></div>
 
   <script type="text/babel">
     const { useState, useEffect, useRef } = React;
-    const uid = () => Math.random().toString(36).slice(2,9);
 
     // ---- Storage Keys ----
     const USERS_KEY = "moments_users";
     const SESSION_KEY = "moments_session";
     const TIMELINES_KEY = "moments_timelines";
     const MESSAGES_KEY = "moments_messages";
+    const THEME_KEY = "moments_theme";
 
-    function read(key){ try{return JSON.parse(localStorage.getItem(key))||{}}catch{return{}} }
-    function write(key,val){ localStorage.setItem(key,JSON.stringify(val)); }
+    const uid = () => Math.random().toString(36).slice(2,9);
 
-    // ---- Auth & Users ----
-    // Users structure: { username: { username, password, id, friends:[], pendingRequests:[], isStar:false } }
+    function read(key){
+      try{ return JSON.parse(localStorage.getItem(key)) || {}; }
+      catch(e){ return {}; }
+    }
+    function write(key,val){
+      localStorage.setItem(key, JSON.stringify(val));
+    }
+
+    // ---- Utilities ----
+    async function sha256Hex(str){
+      // returns hex string
+      const enc = new TextEncoder().encode(str);
+      const buf = await crypto.subtle.digest('SHA-256', enc);
+      const b = Array.from(new Uint8Array(buf)).map(x => x.toString(16).padStart(2,'0')).join('');
+      return b;
+    }
+
     function ensureUserShape(u){
       if(!u.friends) u.friends=[];
       if(!u.pendingRequests) u.pendingRequests=[];
+      if(!u.blocked) u.blocked=[];
+      if(!u.timelines) u.timelines=[];
       if(typeof u.isStar==='undefined') u.isStar=false;
+      if(!u.avatar) u.avatar = null; // data URL or null
+      if(!u.bio) u.bio = "";
       return u;
     }
-    function createAccount(username,password,isStar=false){
-      const users=read(USERS_KEY);
+
+    // ---- User management (now uses hashed password) ----
+    async function createAccount(username, password, isStar=false){
+      const users = read(USERS_KEY);
       if(users[username]) throw new Error("username taken");
-      users[username]=ensureUserShape({username,password,id:uid(),friends:[],pendingRequests:[],isStar});
-      write(USERS_KEY,users);
-    }
-    function signIn(username,password){
-      const users=read(USERS_KEY);
-      if(!users[username]) throw new Error("no such user");
-      if(users[username].password!==password) throw new Error("wrong password");
-      write(SESSION_KEY,{username});
+      const phash = await sha256Hex(password);
+      users[username] = ensureUserShape({
+        username,
+        passwordHash: phash, // store passwordHash instead of raw password
+        id: uid(),
+        friends: [],
+        pendingRequests: [],
+        blocked: [],
+        isStar,
+        avatar: null,
+        bio: ""
+      });
+      write(USERS_KEY, users);
       return users[username];
     }
-    function signOut(){ localStorage.removeItem(SESSION_KEY); }
+
+    async function signIn(username, password){
+      const users = read(USERS_KEY);
+      if(!users[username]) throw new Error("no such user");
+      const stored = users[username];
+      // if stored has passwordHash use it, otherwise (legacy) check raw password
+      const phash = await sha256Hex(password);
+      if(stored.passwordHash){
+        if(stored.passwordHash !== phash) throw new Error("wrong password");
+      } else {
+        // legacy fallback: check raw password field (rare)
+        if(stored.password !== password) throw new Error("wrong password");
+      }
+      write(SESSION_KEY, { username, signedAt: Date.now() });
+      return users[username];
+    }
+
+    function signOut(){
+      localStorage.removeItem(SESSION_KEY);
+    }
     function currentSession(){ return read(SESSION_KEY); }
 
-    // Friend requests and family
-    function sendFriendRequest(from, to){
+    // ---- Friends / Family / Blocking ----
+    // friendRequest object: { from, message?, time }
+    function sendFriendRequest(from, to, message=""){
       const users = read(USERS_KEY);
       if(!users[to]) throw new Error("no such user");
       users[to] = ensureUserShape(users[to]);
-      // avoid duplicates
+      // avoid duplicates & blocked
+      if(users[to].blocked.includes(from)) throw new Error("User has blocked you");
       users[to].pendingRequests = users[to].pendingRequests || [];
-      if(!users[to].pendingRequests.includes(from) && !users[to].friends.includes(from)){
-        users[to].pendingRequests.push(from);
-        write(USERS_KEY,users);
+      if(!users[to].pendingRequests.find(r => r.from === from) && !users[to].friends.includes(from)){
+        users[to].pendingRequests.push({ from, message, time: Date.now() });
+        write(USERS_KEY, users);
       }
     }
+
     function acceptFriendRequest(acceptor, fromUser){
       const users = read(USERS_KEY);
       if(!users[acceptor] || !users[fromUser]) return;
-      users[acceptor].pendingRequests = (users[acceptor].pendingRequests || []).filter(u=>u!==fromUser);
+      users[acceptor].pendingRequests = (users[acceptor].pendingRequests || []).filter(r=>r.from!==fromUser);
       if(!users[acceptor].friends.includes(fromUser)) users[acceptor].friends.push(fromUser);
       if(!users[fromUser].friends.includes(acceptor)) users[fromUser].friends.push(acceptor);
-      write(USERS_KEY,users);
+      write(USERS_KEY, users);
     }
+
     function declineFriendRequest(decliner, fromUser){
       const users = read(USERS_KEY);
       if(!users[decliner]) return;
-      users[decliner].pendingRequests = (users[decliner].pendingRequests || []).filter(u=>u!==fromUser);
-      write(USERS_KEY,users);
+      users[decliner].pendingRequests = (users[decliner].pendingRequests || []).filter(r=>r.from!==fromUser);
+      write(USERS_KEY, users);
     }
+
     function removeFriend(user, friend){
       const users = read(USERS_KEY);
       if(!users[user] || !users[friend]) return;
       users[user].friends = (users[user].friends || []).filter(f=>f!==friend);
       users[friend].friends = (users[friend].friends || []).filter(f=>f!==user);
-      write(USERS_KEY,users);
+      write(USERS_KEY, users);
     }
 
-    function addFriendImmediate(user,friend){
-      // Kept for backward compatibility if used internally; will make them mutual
-      acceptFriendRequest(user, friend);
+    function blockUser(blocker, blockedUser){
+      const users = read(USERS_KEY);
+      if(!users[blocker] || !users[blockedUser]) return;
+      users[blocker].blocked = users[blocker].blocked || [];
+      if(!users[blocker].blocked.includes(blockedUser)) users[blocker].blocked.push(blockedUser);
+      // also remove friend ties
+      users[blocker].friends = users[blocker].friends.filter(f=>f!==blockedUser);
+      users[blockedUser].friends = users[blockedUser].friends.filter(f=>f!==blocker);
+      // remove pending requests from blocked user
+      users[blocker].pendingRequests = (users[blocker].pendingRequests || []).filter(r=>r.from!==blockedUser);
+      write(USERS_KEY, users);
     }
 
     function getFriends(user){ const users=read(USERS_KEY); return users[user]?.friends||[]; }
     function getPendingRequests(user){ const users=read(USERS_KEY); return users[user]?.pendingRequests||[]; }
 
-    // ---- App ----
+    // ---- Timelines / posts ----
+    function saveTimelinesObj(obj){
+      write(TIMELINES_KEY, obj);
+    }
+    function readTimelinesObj(){
+      return read(TIMELINES_KEY) || {};
+    }
+
+    function addTimeline(timeline){
+      const timelines = readTimelinesObj();
+      timelines[timeline.id] = timeline;
+      saveTimelinesObj(timelines);
+    }
+
+    // ---- Messages ----
+    function readMessages(){ return read(MESSAGES_KEY); }
+    function writeMessages(m){ write(MESSAGES_KEY, m); }
+
+    // ---- UI Helpers ----
+    function initialsFromName(name){
+      if(!name) return "?";
+      const parts = name.split(/[\s_-]+/).filter(Boolean);
+      if(parts.length===1) return parts[0].slice(0,2).toUpperCase();
+      return (parts[0][0]+parts[parts.length-1][0]).toUpperCase();
+    }
+
+    // ---- App Component ----
     function MomentsApp(){
-      const [user,setUser]=useState(null);
-      const [view,setView]=useState("timelines");
-      const [timelines,setTimelines]=useState(read(TIMELINES_KEY));
-      const [messages,setMessages]=useState(read(MESSAGES_KEY));
-      const channelRef=useRef(null);
+      const [user, setUser] = useState(null);
+      const [timelines, setTimelines] = useState(readTimelinesObj());
+      const [messages, setMessages] = useState(readMessages());
+      const [view, setView] = useState("timelines");
+      const [theme, setTheme] = useState(localStorage.getItem(THEME_KEY) || "light");
+      const channelRef = useRef(null);
+      const [notifCounts, setNotifCounts] = useState({ requests:0, messages:0 });
 
-      // restore session
+      // session restore
       useEffect(()=>{
-        const session=currentSession();
-        if(session?.username){
-          const users=read(USERS_KEY);
-          if(users[session.username]) setUser(users[session.username]);
+        const sess = currentSession();
+        if(sess?.username){
+          const users = read(USERS_KEY);
+          if(users[sess.username]) setUser(users[sess.username]);
         }
+        setTimelines(readTimelinesObj());
+        setMessages(readMessages());
       },[]);
 
-      // broadcast for local multi-tab testing
       useEffect(()=>{
-        channelRef.current=new BroadcastChannel("moments_channel");
-        channelRef.current.onmessage=(e)=>{
-          if(e.data.type==="message"){
-            setMessages(prev=>{
-              const m={...prev};
-              if(!m[e.data.to]) m[e.data.to]={};
-              if(!m[e.data.to][e.data.from]) m[e.data.to][e.data.from]=[];
-              m[e.data.to][e.data.from].push(e.data.msg);
-              write(MESSAGES_KEY,m);
-              return m;
-            });
-          }
-          if(e.data.type==="timelines_update"){
-            setTimelines(read(TIMELINES_KEY));
-          }
-          if(e.data.type==="users_update"){
-            // update local user replica if necessary
-            const session=currentSession();
-            if(session?.username){
-              const users=read(USERS_KEY);
-              if(users[session.username]) setUser(users[session.username]);
+        // BroadcastChannel for multi-tab
+        try{
+          channelRef.current = new BroadcastChannel("moments_channel");
+          channelRef.current.onmessage = (e) => {
+            if(e.data.type === "users_update"){
+              const sess = currentSession();
+              if(sess?.username){
+                const users = read(USERS_KEY);
+                if(users[sess.username]) setUser(users[sess.username]);
+              }
             }
-          }
-        };
-        return ()=>channelRef.current.close();
+            if(e.data.type === "timelines_update"){
+              setTimelines(readTimelinesObj());
+            }
+            if(e.data.type === "messages_update"){
+              setMessages(readMessages());
+            }
+          };
+        }catch(e){ /* ignore */ }
+        return ()=>{ if(channelRef.current) channelRef.current.close(); };
       },[]);
 
-      function saveTimelines(updated){
-        setTimelines(updated); write(TIMELINES_KEY,updated);
-        if(channelRef.current) channelRef.current.postMessage({type:"timelines_update"});
-      }
+      // theme apply
+      useEffect(()=>{
+        document.documentElement.classList.toggle('dark', theme === 'dark');
+        localStorage.setItem(THEME_KEY, theme);
+      },[theme]);
 
-      function saveUsers(usersObj){
-        write(USERS_KEY, usersObj);
-        if(channelRef.current) channelRef.current.postMessage({type:"users_update"});
-      }
+      // notifications counting
+      useEffect(()=>{
+        if(!user) { setNotifCounts({requests:0, messages:0}); return; }
+        const pending = getPendingRequests(user.username) || [];
+        const allMessages = readMessages() || {};
+        // messages: count number of conversations with unread messages (simpler: count total messages sent to user)
+        const msgsToUser = allMessages[user.username] || {};
+        let unread = 0;
+        Object.values(msgsToUser).forEach(arr => unread += arr.length);
+        setNotifCounts({ requests: pending.length, messages: unread });
+      },[user, messages]);
 
-      function handleCreateTimeline(name,iconFile){
-        const reader=new FileReader();
-        reader.onload=()=>{
-          const newT={id:uid(),name,owner:user.username,posts:[],locked:false,icon:reader.result};
-          const updated={...timelines,[newT.id]:newT};
-          saveTimelines(updated);
+      // Helpers for saving/updating globally
+      function broadcastUsersUpdate(){ if(channelRef.current) channelRef.current.postMessage({type:'users_update'}); }
+      function broadcastTimelinesUpdate(){ if(channelRef.current) channelRef.current.postMessage({type:'timelines_update'}); }
+      function broadcastMessagesUpdate(){ if(channelRef.current) channelRef.current.postMessage({type:'messages_update'}); }
+
+      // timeline helpers
+      function handleCreateTimeline(name, iconFile){
+        const reader = new FileReader();
+        reader.onload = () => {
+          const newT = { id: uid(), name, owner: user.username, posts: [], locked: false, icon: reader.result, created: Date.now() };
+          const tl = readTimelinesObj();
+          tl[newT.id] = newT;
+          saveTimelinesObj(tl);
+          setTimelines(tl);
+          broadcastTimelinesUpdate();
         };
         if(iconFile) reader.readAsDataURL(iconFile);
-        else{
-          const newT={id:uid(),name,owner:user.username,posts:[],locked:false,icon:null};
-          const updated={...timelines,[newT.id]:newT};
-          saveTimelines(updated);
+        else {
+          const newT = { id: uid(), name, owner: user.username, posts: [], locked: false, icon: null, created: Date.now() };
+          const tl = readTimelinesObj();
+          tl[newT.id] = newT;
+          saveTimelinesObj(tl);
+          setTimelines(tl);
+          broadcastTimelinesUpdate();
         }
       }
 
-      function handleAddPost(tid,content,type){
-        const t={...timelines[tid]};
-        t.posts.push({id:uid(),owner:user.username,type,content,created:Date.now()});
-        const updated={...timelines,[tid]:t};
-        saveTimelines(updated);
+      function handleAddPost(tid, content, type){
+        const tl = readTimelinesObj();
+        const t = {...tl[tid]};
+        t.posts = t.posts || [];
+        t.posts.unshift({ id: uid(), owner: user.username, type, content, created: Date.now() });
+        tl[tid] = t;
+        saveTimelinesObj(tl);
+        setTimelines(tl);
+        broadcastTimelinesUpdate();
       }
 
-      function handleDeletePost(tid,pid){
-        const t={...timelines[tid], posts: timelines[tid].posts.filter(p=>p.id!==pid)};
-        const updated={...timelines,[tid]:t};
-        saveTimelines(updated);
+      function handleDeletePost(tid, pid){
+        const tl = readTimelinesObj();
+        const t = {...tl[tid], posts: (tl[tid].posts || []).filter(p=>p.id!==pid)};
+        tl[tid] = t;
+        saveTimelinesObj(tl);
+        setTimelines(tl);
+        broadcastTimelinesUpdate();
       }
 
       function toggleLock(tid){
-        const t={...timelines[tid]};
-        t.locked=!t.locked;
-        const updated={...timelines,[tid]:t};
-        saveTimelines(updated);
+        const tl = readTimelinesObj();
+        const t = {...tl[tid], locked: !tl[tid].locked};
+        tl[tid] = t;
+        saveTimelinesObj(tl);
+        setTimelines(tl);
+        broadcastTimelinesUpdate();
       }
 
-      function sendMessage(to,text){
-        // messages are allowed but Chat page shows only family contacts.
-        const msg={from:user.username,to,text,time:Date.now()};
-        const m={...messages};
-        if(!m[user.username]) m[user.username]={};
-        if(!m[user.username][to]) m[user.username][to]=[];
+      // messaging
+      function sendMessage(to, text){
+        const m = readMessages();
+        if(!m[to]) m[to] = {};
+        if(!m[to][user.username]) m[to][user.username] = [];
+        if(!m[user.username]) m[user.username] = {};
+        if(!m[user.username][to]) m[user.username][to] = [];
+        const msg = { from: user.username, to, text, time: Date.now() };
         m[user.username][to].push(msg);
-
-        if(!m[to]) m[to]={};
-        if(!m[to][user.username]) m[to][user.username]=[];
         m[to][user.username].push(msg);
-
-        setMessages(m); write(MESSAGES_KEY,m);
-        if(channelRef.current) channelRef.current.postMessage({type:"message",to,from:user.username,msg});
+        writeMessages(m);
+        setMessages(m);
+        broadcastMessagesUpdate();
       }
 
-      // friend request helpers
-      function requestAddFamily(targetUsername){
+      // user helper updates (profile edit, avatar)
+      function updateMyProfile(patch){
+        const users = read(USERS_KEY);
+        if(!users[user.username]) return;
+        users[user.username] = ensureUserShape({ ...users[user.username], ...patch });
+        write(USERS_KEY, users);
+        setUser(users[user.username]);
+        broadcastUsersUpdate();
+      }
+
+      // request helpers wrappers
+      function requestAddFamily(targetUsername, message=""){
         try{
-          sendFriendRequest(user.username, targetUsername);
-          const users = read(USERS_KEY);
-          // notify by immediate save
-          write(USERS_KEY, users);
-          if(channelRef.current) channelRef.current.postMessage({type:"users_update"});
+          sendFriendRequest(user.username, targetUsername, message);
+          broadcastUsersUpdate();
           alert("Friend request sent.");
         }catch(e){ alert(e.message); }
       }
       function acceptRequest(fromUser){
         acceptFriendRequest(user.username, fromUser);
-        const users = read(USERS_KEY);
-        write(USERS_KEY, users);
-        if(channelRef.current) channelRef.current.postMessage({type:"users_update"});
-        // update local user state
-        const session = currentSession();
-        if(session?.username) setUser(read(USERS_KEY)[session.username]);
+        broadcastUsersUpdate();
       }
       function declineRequest(fromUser){
         declineFriendRequest(user.username, fromUser);
-        const users = read(USERS_KEY);
-        write(USERS_KEY, users);
-        if(channelRef.current) channelRef.current.postMessage({type:"users_update"});
-        const session = currentSession();
-        if(session?.username) setUser(read(USERS_KEY)[session.username]);
+        broadcastUsersUpdate();
+      }
+      function removeFriendUI(friend){
+        removeFriend(user.username, friend);
+        broadcastUsersUpdate();
+      }
+      function blockUserUI(blockedUser){
+        blockUser(user.username, blockedUser);
+        broadcastUsersUpdate();
       }
 
-      return user
-        ? <Dashboard user={user} setUser={setUser} view={view} setView={setView} timelines={timelines} messages={messages} sendMessage={sendMessage} handleCreateTimeline={handleCreateTimeline} handleAddPost={handleAddPost} handleDeletePost={handleDeletePost} toggleLock={toggleLock} requestAddFamily={requestAddFamily} acceptRequest={acceptRequest} declineRequest={declineRequest} saveUsers={saveUsers} />
-        : <AuthPanel setUser={setUser} />;
+      // export / import
+      function exportData(){
+        const exportObj = {
+          users: read(USERS_KEY),
+          timelines: readTimelinesObj(),
+          messages: readMessages()
+        };
+        const blob = new Blob([JSON.stringify(exportObj, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `moments-export-${new Date().toISOString().slice(0,10)}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+
+      function importData(file){
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          try{
+            const parsed = JSON.parse(e.target.result);
+            if(parsed.users) write(USERS_KEY, parsed.users);
+            if(parsed.timelines) write(TIMELINES_KEY, parsed.timelines);
+            if(parsed.messages) write(MESSAGES_KEY, parsed.messages);
+            // refresh app
+            setTimelines(readTimelinesObj());
+            setMessages(readMessages());
+            const sess = currentSession();
+            if(sess?.username){
+              const users = read(USERS_KEY);
+              if(users[sess.username]) setUser(users[sess.username]);
+            }
+            alert('Import complete.');
+            broadcastTimelinesUpdate();
+            broadcastMessagesUpdate();
+            broadcastUsersUpdate();
+          }catch(err){ alert('Import failed: invalid JSON'); }
+        };
+        reader.readAsText(file);
+      }
+
+      // small helper: count unread messages for header badge
+      function totalUnreadMessages(){
+        const all = readMessages()[user?.username] || {};
+        let n = 0;
+        Object.values(all).forEach(arr => n += arr.length);
+        return n;
+      }
+
+      // Render
+      return user ? (
+        <div className="min-h-screen">
+          <Header
+            user={user}
+            onSignOut={()=>{ signOut(); setUser(null); }}
+            notifCounts={notifCounts}
+            setView={setView}
+            theme={theme}
+            setTheme={setTheme}
+            exportData={exportData}
+            importData={importData}
+            messages={messages}
+          />
+
+          <div className="p-4 max-w-6xl mx-auto">
+            <div className="flex flex-col sm:flex-row gap-4">
+              <nav className="flex sm:flex-col gap-2 sm:w-48 w-full">
+                <NavButton active={view==="timelines"} onClick={()=>setView("timelines")}>Timelines</NavButton>
+                <NavButton active={view==="feed"} onClick={()=>setView("feed")}>Feed</NavButton>
+                <NavButton active={view==="chat"} onClick={()=>setView("chat")}>Chat</NavButton>
+                <NavButton active={view==="family"} onClick={()=>setView("family")}>Family</NavButton>
+                <NavButton active={view==="memory"} onClick={()=>setView("memory")}>Memory Lane</NavButton>
+                <NavButton active={view==="profile"} onClick={()=>setView("profile")}>Profile</NavButton>
+                <NavButton active={view==="shop"} onClick={()=>setView("shop")}>Shop</NavButton>
+              </nav>
+
+              <main className="flex-1">
+                {view==="timelines" && <TimelinesPage user={user} timelines={timelines} handleCreateTimeline={handleCreateTimeline} handleAddPost={handleAddPost} handleDeletePost={handleDeletePost} toggleLock={toggleLock} />}
+                {view==="feed" && <Feed user={user} timelines={timelines} />}
+                {view==="chat" && <Chat user={user} messages={messages} sendMessage={sendMessage} />}
+                {view==="family" && <FamilyPage user={user} requestAddFamily={requestAddFamily} acceptRequest={acceptRequest} declineRequest={declineRequest} removeFriendUI={removeFriendUI} blockUserUI={blockUserUI} />}
+                {view==="memory" && <MemoryLanePage user={user} timelines={timelines} />}
+                {view==="profile" && <ProfilePage user={user} updateMyProfile={updateMyProfile} timelines={timelines} handleCreateTimeline={handleCreateTimeline} />}
+                {view==="shop" && <Shop />}
+              </main>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <AuthPanel setUser={async (u) => {
+          // refresh users and session
+          const users = read(USERS_KEY);
+          if(users[u.username]) setUser(users[u.username]);
+        }} />
+      );
     }
 
-    // ---- Auth Panel with Star Program flow ----
-    function AuthPanel({setUser}){
-      const [mode,setMode]=useState("signin");
-      const [u,setU]=useState(""),[p,setP]=useState(""),[err,setErr]=useState("");
-      const [isStar,setIsStar]=useState(false);
-      const [showWarning,setShowWarning]=useState(false);
+    // ---- UI Subcomponents ----
 
-      function submit(e){ e.preventDefault();
+    function Header({ user, onSignOut, notifCounts, setView, theme, setTheme, exportData, importData, messages }){
+      const [showNotif, setShowNotif] = useState(false);
+      const [showImportPicker, setShowImportPicker] = useState(false);
+      const fileRef = useRef(null);
+
+      function triggerImport(){
+        fileRef.current.click();
+      }
+      function onFilePicked(e){
+        const file = e.target.files[0];
+        if(file) {
+          // call parent import via a custom event (MomentsApp exposes importData by prop, but file input lives here)
+          // We'll dispatch an event that MomentsApp listens to is not implemented — instead, use a hidden global function.
+          // Simpler: try to call window.__MOMENTS_IMPORT if set (we'll set it below)
+          if(window.__MOMENTS_IMPORT){
+            window.__MOMENTS_IMPORT(file);
+          } else {
+            alert("Import handler not available");
+          }
+        }
+      }
+
+      // expose import callback to global (so MomentsApp's importData can be used here)
+      useEffect(()=>{
+        // no-op, MomentsApp sets window.__MOMENTS_IMPORT later in render by closure; handled below in main render
+      },[]);
+
+      return (
+        <header className="bg-white dark:bg-slate-800 shadow-md p-4">
+          <div className="max-w-6xl mx-auto flex items-center justify-between gap-4">
+            <div className="flex items-center gap-4">
+              <div className="text-xl font-extrabold text-indigo-600">Moments</div>
+              <div className="text-sm text-slate-500 hidden sm:block">Made by Leo</div>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <div className="hidden sm:flex items-center gap-2 text-sm">
+                <span>Hello,</span>
+                <span className="font-semibold">{user.username}{user.isStar ? " ⭐" : ""}</span>
+              </div>
+
+              <button onClick={()=>setView("profile")} className="hidden sm:inline-flex items-center gap-2 rounded p-1 hover:bg-slate-100 dark:hover:bg-slate-700">
+                <AvatarSmall user={user} />
+              </button>
+
+              <div className="relative">
+                <button title="Notifications" onClick={()=>setShowNotif(s=>!s)} className="px-3 py-2 border rounded flex items-center gap-2">
+                  🔔
+                  {(notifCounts.requests+notifCounts.messages) > 0 && (
+                    <span className="text-xs bg-red-500 text-white px-2 py-0.5 rounded">{notifCounts.requests+notifCounts.messages}</span>
+                  )}
+                </button>
+                {showNotif && (
+                  <div className="absolute right-0 mt-2 w-72 bg-white dark:bg-slate-800 border rounded shadow p-3 z-40">
+                    <div className="font-semibold mb-2">Notifications</div>
+                    <div className="text-sm text-slate-600 dark:text-slate-300">Friend requests: <b>{notifCounts.requests}</b></div>
+                    <div className="text-sm text-slate-600 dark:text-slate-300">Messages: <b>{notifCounts.messages}</b></div>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button className="px-3 py-2 border rounded" onClick={exportData}>Export</button>
+                <input ref={fileRef} type="file" accept="application/json" onChange={onFilePicked} className="hidden" />
+                <button className="px-3 py-2 border rounded" onClick={triggerImport}>Import</button>
+                <button className="px-3 py-2 border rounded" onClick={()=>setTheme(theme==='dark'?'light':'dark')}>
+                  {theme==='dark' ? 'Light' : 'Dark'}
+                </button>
+                <button className="px-3 py-2 border rounded" onClick={onSignOut}>Sign out</button>
+              </div>
+            </div>
+          </div>
+        </header>
+      )
+    }
+
+    function AvatarSmall({ user, size = 8 }){
+      if(user.avatar){
+        return <img src={user.avatar} alt="avatar" className={`w-${size} h-${size} rounded-full object-cover`} style={{width: size*4, height: size*4}} />
+      }
+      const initials = initialsFromName(user.username);
+      return <div className="w-8 h-8 rounded-full bg-indigo-600 text-white flex items-center justify-center text-sm font-semibold">{initials}</div>
+    }
+
+    function NavButton({ children, active=false, onClick }){
+      return <button onClick={onClick} className={`px-3 py-3 rounded text-left ${active ? 'bg-slate-900 text-white' : 'border' }`}>{children}</button>
+    }
+
+    // ---- Auth Panel (signup/signin) ----
+    function AuthPanel({ setUser }){
+      const [mode, setMode] = useState("signin");
+      const [username, setUsername] = useState("");
+      const [password, setPassword] = useState("");
+      const [err, setErr] = useState("");
+      const [isStar, setIsStar] = useState(false);
+      const [showWarning, setShowWarning] = useState(false);
+
+      async function submit(e){
+        e.preventDefault();
+        setErr("");
         try{
-          if(mode==="signup"){
+          if(mode === "signup"){
             if(isStar){
-              // show warning modal and require confirmation
+              // require confirmation
               setShowWarning(true);
               return;
             }
-            createAccount(u,p,false);
+            await createAccount(username, password, false);
           }
-          signIn(u,p);
-          // refresh session
-          setUser(read(USERS_KEY)[u]);
-        }catch(e){setErr(e.message);}      }
+          await signIn(username, password);
+          const users = read(USERS_KEY);
+          setUser(users[username]);
+        }catch(e){
+          setErr(e.message);
+        }
+      }
 
-      function confirmStarSignup(){
+      async function confirmStarSignup(){
         try{
-          createAccount(u,p,true);
-          signIn(u,p);
-          setUser(read(USERS_KEY)[u]);
+          await createAccount(username, password, true);
+          await signIn(username, password);
+          const users = read(USERS_KEY);
+          setUser(users[username]);
           setShowWarning(false);
-        }catch(e){setErr(e.message); setShowWarning(false);}      }
+        }catch(e){ setErr(e.message); setShowWarning(false); }
+      }
 
-      return(
-        <div className="p-6 bg-white rounded-xl shadow max-w-md mx-auto mt-12">
-          <h2 className="text-xl font-bold mb-3">{mode==="signin"?"Sign In":"Create Account"}</h2>
-          <form onSubmit={submit} className="space-y-2">
-            <input className="w-full p-3 border rounded" placeholder="username" value={u} onChange={e=>setU(e.target.value)} />
-            <input className="w-full p-3 border rounded" placeholder="password" type="password" value={p} onChange={e=>setP(e.target.value)} />
-            {mode==="signup" && (
+      return (
+        <div className="p-6 bg-white rounded-2xl shadow-lg max-w-md mx-auto mt-12">
+          <h2 className="text-xl font-bold mb-3">{mode === "signin" ? "Sign In" : "Create Account"}</h2>
+          <form onSubmit={submit} className="space-y-3">
+            <input value={username} onChange={e=>setUsername(e.target.value)} placeholder="username" className="w-full p-3 border rounded" />
+            <input value={password} onChange={e=>setPassword(e.target.value)} placeholder="password" type="password" className="w-full p-3 border rounded" />
+            {mode === "signup" && (
               <label className="flex items-center gap-2">
                 <input type="checkbox" checked={isStar} onChange={e=>setIsStar(e.target.checked)} />
-                Join the Star Program (public visibility for unlocked posts)
+                Join the Star Program (public visibility)
               </label>
             )}
-            {err && <div className="text-red-600 text-sm">{err}</div>}
-            <button className="w-full px-3 py-2 bg-slate-900 text-white rounded">{mode==="signin"?"Sign in":"Sign up"}</button>
+            {err && <div className="text-red-600">{err}</div>}
+            <button className="w-full px-4 py-2 bg-indigo-600 text-white rounded">{mode==="signin"?"Sign in":"Sign up"}</button>
           </form>
 
-          <button onClick={()=>setMode(mode==="signin"?"signup":"signin")} className="w-full mt-3 px-3 py-2 border rounded">{mode==="signin"?"Need an account? Sign up":"Have an account? Sign in"}</button>
+          <div className="mt-3 flex gap-2">
+            <button onClick={()=>setMode(mode==="signin"?"signup":"signin")} className="flex-1 px-3 py-2 border rounded">{mode==="signin"?"Need an account? Sign up":"Have an account? Sign in"}</button>
+          </div>
 
-          {/* Warning modal for Star Program signup */}
           {showWarning && (
             <div className="fixed inset-0 flex items-center justify-center bg-black/40 p-4">
               <div className="bg-white rounded p-4 max-w-md w-full">
                 <h3 className="font-bold mb-2">Star Program — public visibility</h3>
-                <p className="text-sm mb-3">By joining the Star Program, any timeline posts you leave unlocked will be visible to everyone (this site is local-only for testing, but unlocked posts are public to all users on this device). Are you sure you want to continue?</p>
+                <p className="text-sm mb-3">By joining the Star Program, any timeline posts you leave unlocked will be visible to everyone (local device). Continue?</p>
                 <div className="flex gap-2 justify-end">
                   <button onClick={()=>setShowWarning(false)} className="px-3 py-1 border rounded">Cancel</button>
-                  <button onClick={confirmStarSignup} className="px-3 py-1 bg-amber-500 text-black rounded">Yes, join Star Program</button>
+                  <button onClick={confirmStarSignup} className="px-3 py-1 bg-amber-500 text-black rounded">Yes, join</button>
                 </div>
               </div>
             </div>
@@ -297,258 +620,163 @@
       )
     }
 
-    // ---- Dashboard with tabs: Timelines / Feed / Chat / Family / Memory Lane / Shop ----
-    function Dashboard({user,setUser,view,setView,timelines,messages,sendMessage,handleCreateTimeline,handleAddPost,handleDeletePost,toggleLock,requestAddFamily,acceptRequest,declineRequest,saveUsers}){
-      const [showRequests,setShowRequests]=useState(false);
-      const users=read(USERS_KEY);
-      const pending = getPendingRequests(user.username);
+    // ---- Timelines Page (with vertical timeline + colored dots & animations) ----
+    function TimelinesPage({ user, timelines, handleCreateTimeline, handleAddPost, handleDeletePost, toggleLock }){
+      const [name, setName] = useState("");
+      const [iconFile, setIconFile] = useState(null);
 
-      function signout(){
-        signOut();
-        setUser(null);
+      const myTimelines = Object.values(timelines).filter(t => t.owner === user.username).sort((a,b)=>b.created - a.created);
+
+      return (
+        <div>
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-xl font-semibold">Your Timelines</h2>
+            <div className="flex gap-2">
+              <input className="p-2 border rounded" placeholder="New timeline name" value={name} onChange={e=>setName(e.target.value)} />
+              <input type="file" accept="image/*" onChange={e=>setIconFile(e.target.files[0])} />
+              <button onClick={()=>{
+                if(!name) return alert('Name required');
+                handleCreateTimeline(name, iconFile);
+                setName('');
+                setIconFile(null);
+              }} className="px-3 py-2 bg-indigo-600 text-white rounded">Create</button>
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            {myTimelines.map(t => <Timeline key={t.id} timeline={t} isOwner handleAddPost={handleAddPost} handleDeletePost={handleDeletePost} toggleLock={toggleLock} />)}
+            {myTimelines.length===0 && <div className="text-slate-500">No timelines yet — create one above.</div>}
+          </div>
+        </div>
+      )
+    }
+
+    function Timeline({ timeline, isOwner, handleAddPost, handleDeletePost, toggleLock }){
+      const [open, setOpen] = useState(false);
+      const [text, setText] = useState("");
+      const [file, setFile] = useState(null);
+
+      function postTypeColor(type){
+        if(type === 'text') return 'bg-green-400';
+        if(type === 'file') return 'bg-blue-400';
+        return 'bg-slate-900';
       }
 
-      return(
-        <div className="p-4 max-w-6xl mx-auto">
-          <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center mb-6 gap-3">
-            <div className="flex items-center gap-3">
-              <h1 className="text-2xl font-bold">Moments</h1>
-              <span className="text-sm text-slate-500">Made by Leo</span>
-            </div>
-            <div className="flex gap-3 items-center">
-              <div className="hidden sm:block">Hello, <b>{user.username}</b>{user.isStar?" ⭐":""}</div>
-              <button onClick={()=>setShowRequests(true)} className="px-3 py-2 border rounded flex items-center gap-2">
-                Requests {pending.length>0 && <span className="text-xs bg-amber-500 text-black px-2 py-0.5 rounded">{pending.length}</span>}
-              </button>
-              <button onClick={signout} className="px-3 py-2 border rounded">Sign out</button>
-            </div>
-          </div>
-
-          <div className="flex flex-col sm:flex-row gap-4">
-            <nav className="flex sm:flex-col gap-2 sm:w-48 w-full">
-              <button onClick={()=>setView("timelines")} className={`px-3 py-3 rounded text-left ${view==="timelines"?"bg-slate-900 text-white":"border"}`}>Timelines</button>
-              <button onClick={()=>setView("feed")} className={`px-3 py-3 rounded text-left ${view==="feed"?"bg-slate-900 text-white":"border"}`}>Feed</button>
-              <button onClick={()=>setView("chat")} className={`px-3 py-3 rounded text-left ${view==="chat"?"bg-slate-900 text-white":"border"}`}>Chat</button>
-              <button onClick={()=>setView("family")} className={`px-3 py-3 rounded text-left ${view==="family"?"bg-slate-900 text-white":"border"}`}>Family</button>
-              <button onClick={()=>setView("memory")} className={`px-3 py-3 rounded text-left ${view==="memory"?"bg-slate-900 text-white":"border"}`}>Memory Lane</button>
-              <button onClick={()=>setView("shop")} className={`px-3 py-3 rounded text-left ${view==="shop"?"bg-slate-900 text-white":"border"}`}>Shop</button>
-            </nav>
-
-            <main className="flex-1">
-              {view==="timelines" && <Timelines user={user} timelines={timelines} handleCreateTimeline={handleCreateTimeline} handleAddPost={handleAddPost} handleDeletePost={handleDeletePost} toggleLock={toggleLock} />}
-              {view==="feed" && <Feed user={user} timelines={timelines} />}
-              {view==="chat" && <Chat user={user} messages={messages} sendMessage={sendMessage} />}
-              {view==="family" && <Family user={user} timelines={timelines} messages={messages} requestAddFamily={requestAddFamily} />}
-              {view==="memory" && <MemoryLane user={user} timelines={timelines} />}
-              {view==="shop" && <Shop />}
-            </main>
-          </div>
-
-          {/* Friend requests modal */}
-          {showRequests && (
-            <div className="fixed inset-0 flex items-center justify-center bg-black/40 p-4 z-50">
-              <div className="bg-white rounded p-4 max-w-md w-full">
-                <h3 className="font-bold mb-3">Friend Requests</h3>
-                {pending.length===0 && <div className="text-slate-500">No requests.</div>}
-                <div className="space-y-2 max-h-64 overflow-y-auto">
-                  {pending.map((from)=>
-                    <div key={from} className="flex items-center justify-between bg-slate-50 p-2 rounded">
-                      <div>{from}</div>
-                      <div className="flex gap-2">
-                        <button onClick={()=>{acceptRequest(from);}} className="px-3 py-1 bg-green-600 text-white rounded">Accept</button>
-                        <button onClick={()=>{declineRequest(from);}} className="px-3 py-1 border rounded">Decline</button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-                <div className="mt-3 flex justify-end">
-                  <button onClick={()=>setShowRequests(false)} className="px-3 py-1 border rounded">Close</button>
-                </div>
+      return (
+        <div className="bg-white p-4 rounded-2xl shadow">
+          <div className="flex justify-between items-center">
+            <div className="flex items-center gap-3 cursor-pointer" onClick={()=>setOpen(!open)}>
+              {timeline.icon ? <img src={timeline.icon} className="w-12 h-12 rounded-full object-cover" /> : <div className="w-12 h-12 rounded-full bg-indigo-500 text-white flex items-center justify-center font-semibold">{initialsFromName(timeline.name)}</div>}
+              <div>
+                <div className="font-bold">{timeline.name}</div>
+                <div className="text-xs text-slate-500">{timeline.owner}</div>
               </div>
             </div>
-          )}
-        </div>
-      )
-    }
 
-    // ---- Timelines (unchanged behaviour, keep lock control) ----
-    function Timelines({user,timelines,handleCreateTimeline,handleAddPost,handleDeletePost,toggleLock}){
-      const [name,setName]=useState("");
-      const [iconFile,setIconFile]=useState(null);
-      const myT=Object.values(timelines).filter(t=>t.owner===user.username);
-      return(
-        <div>
-          <h2 className="text-xl font-semibold mb-4">Your Timelines</h2>
-          <div className="flex flex-col sm:flex-row gap-2 mb-4">
-            <input className="flex-1 p-3 border rounded" placeholder="New timeline name" value={name} onChange={e=>setName(e.target.value)} />
-            <input type="file" accept="image/*" onChange={e=>setIconFile(e.target.files[0])} className="py-2" />
-            <button onClick={()=>{if(name){handleCreateTimeline(name,iconFile);setName("");setIconFile(null);}}} className="px-4 py-2 bg-slate-900 text-white rounded">Create</button>
-          </div>
-          <div className="grid gap-4">
-            {myT.map(t=><Timeline key={t.id} timeline={t} isOwner handleAddPost={handleAddPost} handleDeletePost={handleDeletePost} toggleLock={toggleLock} />)}
-          </div>
-        </div>
-      )
-    }
-
-    function Timeline({timeline,isOwner,handleAddPost,handleDeletePost,toggleLock}){
-      const [text,setText]=useState("");
-      const [file,setFile]=useState(null);
-      const [open,setOpen]=useState(false);
-
-      return(
-        <div className="bg-white p-4 rounded-xl shadow mb-4">
-          <div className="flex justify-between items-center mb-2">
             <div className="flex items-center gap-2">
-              <button aria-label={open?"Close timeline":"Open timeline"} onClick={()=>setOpen(!open)} className="p-2 rounded hover:bg-slate-100 transform transition-transform duration-200">
-                {/* Sleeker SVG chevron instead of plain arrows */}
-                <svg className={`w-5 h-5 text-slate-700 transform transition-transform duration-200 ${open?"rotate-180":""}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7"></path>
-                </svg>
-              </button>
-              <div className="flex items-center gap-2 cursor-pointer" onClick={()=>setOpen(!open)}>
-                {timeline.icon && <img src={timeline.icon} alt="" className="w-10 h-10 rounded-full" />}
-                <div>
-                  <h3 className="font-bold">{timeline.name}</h3>
-                  <div className="text-xs text-slate-500">{timeline.owner}</div>
-                </div>
-              </div>
+              {isOwner && <button onClick={()=>toggleLock(timeline.id)} className="px-3 py-1 border rounded text-sm">{timeline.locked ? '🔒 Private' : '🔓 Unlocked'}</button>}
+              <button onClick={()=>setOpen(!open)} className="px-3 py-1 border rounded">{open ? 'Close' : 'Open'}</button>
             </div>
-            {isOwner && (
-              <div className="flex items-center gap-2">
-                <button onClick={()=>toggleLock(timeline.id)} className="text-sm px-3 py-2 border rounded">
-                  {timeline.locked ? "🔒 Private" : "🔓 Unlocked"}
-                </button>
-              </div>
-            )}
           </div>
+
           {open && (
-            <>
+            <div className="mt-4">
               {isOwner && (
-                <div className="mb-3 space-y-2">
-                  <textarea className="w-full border p-2 rounded" placeholder="Write something..." value={text} onChange={e=>setText(e.target.value)} />
-                  <div className="flex gap-2 flex-wrap">
-                    <button onClick={()=>text && handleAddPost(timeline.id,text,"text")} className="px-3 py-1 bg-slate-900 text-white rounded">Add Text</button>
+                <div className="mb-4 space-y-2">
+                  <textarea value={text} onChange={e=>setText(e.target.value)} placeholder="Write something..." className="w-full p-2 border rounded" />
+                  <div className="flex gap-2">
+                    <button onClick={()=>{ if(text){ handleAddPost(timeline.id, text, 'text'); setText(''); } }} className="px-3 py-1 bg-indigo-600 text-white rounded">Post</button>
                     <input type="file" onChange={e=>setFile(e.target.files[0])} />
-                    <button onClick={()=>file && handleAddPost(timeline.id,{name:file.name,type:file.type,url:URL.createObjectURL(file)},"file")} className="px-3 py-1 border rounded">Upload</button>
+                    <button onClick={()=>{ if(file) handleAddPost(timeline.id, { name: file.name, type: file.type, url: URL.createObjectURL(file) }, 'file'); }} className="px-3 py-1 border rounded">Upload</button>
                   </div>
                 </div>
               )}
 
-              {/* NEW: Vertical timeline style with a connecting line and dots */}
               <div className="relative pl-8">
-                {/* vertical line */}
-                <div className="absolute left-4 top-6 bottom-0 w-0.5 bg-slate-300"></div>
-
+                <div className="absolute left-6 top-8 bottom-1 w-0.5 bg-slate-200"></div>
                 <div className="space-y-6">
-                  {timeline.posts.map((p)=>(
+                  { (timeline.posts || []).map(p => (
                     <div key={p.id} className="relative">
-                      {/* dot */}
-                      <div className="absolute -left-6 top-3 w-3 h-3 bg-slate-900 rounded-full ring-2 ring-white"></div>
-
-                      <div className="bg-white p-3 rounded-xl shadow">
+                      <div className={`absolute -left-7 top-4 w-3 h-3 rounded-full ${postTypeColor(p.type)}`}></div>
+                      <div className="bg-slate-50 p-3 rounded-xl shadow">
                         <div className="flex justify-between items-center mb-1 text-xs text-slate-500">
-                          <span>{p.owner} • {new Date(p.created).toLocaleString()}</span>
-                          {isOwner && <button onClick={()=>handleDeletePost(timeline.id,p.id)} className="text-red-600 text-xs">✕</button>}
+                          <div>{p.owner} • {new Date(p.created).toLocaleString()}</div>
+                          {isOwner && <button onClick={()=>handleDeletePost(timeline.id, p.id)} className="text-red-600 text-xs">Delete</button>}
                         </div>
-                        {p.type==="text" && <div>{p.content}</div>}
-                        {p.type==="file" && (
-                          p.content.type.startsWith("image") ?
-                            <img src={p.content.url} alt="" className="w-full h-48 object-cover rounded" /> :
-                            <video src={p.content.url} controls className="w-full h-48 rounded" />
+                        {p.type === 'text' && <div>{p.content}</div>}
+                        {p.type === 'file' && (
+                          p.content.type?.startsWith('image') ? <img src={p.content.url} className="w-full h-48 object-cover rounded" /> : <video src={p.content.url} controls className="w-full h-48 rounded" />
                         )}
                       </div>
                     </div>
-                  ))}
+                  )) }
+                  { (timeline.posts || []).length === 0 && <div className="text-slate-500">No posts yet</div> }
                 </div>
               </div>
-            </>
+            </div>
           )}
         </div>
       )
     }
 
-    function PostCard({p,isOwner,timelineId,handleDeletePost}){
-      return(
-        <div className="relative z-10 flex-shrink-0 min-w-[220px]">
-          <div className={`bg-white border rounded-xl p-3 shadow text-sm ${p.type==="text"?"max-w-xs":""}`}>
-            <div className="flex justify-between items-center mb-1 text-xs text-slate-500">
-              <span>{p.owner} • {new Date(p.created).toLocaleString()}</span>
-              {isOwner && <button onClick={()=>handleDeletePost(timelineId,p.id)} className="text-red-600 text-xs">✕</button>}
-            </div>
-            {p.type==="text" && <div>{p.content}</div>}
-            {p.type==="file" && (
-              p.content.type.startsWith("image") ?
-                <img src={p.content.url} alt="" className="w-full h-32 object-cover rounded"/> :
-                <video src={p.content.url} controls className="w-full h-32 rounded" />
-            )}
-          </div>
-        </div>
-      )
-    }
-
-    // ---- Feed: shows unlocked timelines ONLY if owner is in your family or isStar ----
-    function Feed({user,timelines}){
-      const users=read(USERS_KEY);
-      const myFriends=getFriends(user.username);
-      const allVisible=Object.values(timelines).filter(t=>{
-        if(!t.locked) {
-          const owner = t.owner;
-          // show unlocked only if owner is family or owner is star
-          return myFriends.includes(owner) || users[owner]?.isStar;
-        }
-        return false;
-      });
-      return(
+    // ---- Feed Page ----
+    function Feed({ user, timelines }){
+      const users = read(USERS_KEY);
+      const myFriends = getFriends(user.username);
+      const visible = Object.values(timelines || {}).filter(t => !t.locked && (myFriends.includes(t.owner) || users[t.owner]?.isStar));
+      return (
         <div>
-          <h2 className="text-xl font-semibold mb-4">Feed (Unlocked posts from family or Star members)</h2>
-          {allVisible.length===0 && <div className="text-slate-500">No unlocked posts visible to you yet.</div>}
-          <div className="grid gap-3">
-            {allVisible.map(t=> (
-              <div key={t.id} className="bg-white p-3 rounded shadow">
+          <h2 className="text-xl font-semibold mb-4">Feed</h2>
+          <div className="space-y-4">
+            {visible.map(t => (
+              <div key={t.id} className="bg-white p-4 rounded-xl shadow">
                 <div className="flex justify-between items-center mb-2">
                   <div>
                     <div className="font-bold">{t.name} <span className="text-xs text-slate-500">by {t.owner}</span></div>
-                    <div className="text-xs text-slate-400">{myFriends.includes(t.owner)?"Family":"Star"}{users[t.owner]?.isStar?" • Star":""}</div>
+                    <div className="text-xs text-slate-400">{myFriends.includes(t.owner) ? "Family" : "Star"}{users[t.owner]?.isStar ? " • Star" : ""}</div>
                   </div>
                 </div>
                 <div className="flex gap-3 overflow-x-auto">
-                  {t.posts.map(p=>(
+                  { (t.posts || []).map(p => (
                     <div key={p.id} className="min-w-[220px]">
                       <div className="bg-slate-50 p-3 rounded">
-                        {p.type==="text"?p.content:(p.content.name)}
+                        {p.type==="text" ? p.content : p.content.name}
                         <div className="text-xs text-slate-400 mt-2">{new Date(p.created).toLocaleString()}</div>
                       </div>
                     </div>
-                  ))}
+                  )) }
                 </div>
               </div>
             ))}
+            {visible.length===0 && <div className="text-slate-500">No unlocked posts visible to you yet.</div>}
           </div>
         </div>
       )
     }
 
-    // ---- Chat as its own page (optimized for phone). Show only family contacts ----
-    function Chat({user,messages,sendMessage}){
-      const users=read(USERS_KEY);
-      const myFriends=getFriends(user.username);
-      const family = myFriends.filter(u=>u in users);
-      const [selected,setSelected]=useState(family[0]||null);
-      const [text,setText]=useState("");
+    // ---- Chat Page ----
+    function Chat({ user, messages, sendMessage }){
+      const users = read(USERS_KEY);
+      const myFriends = getFriends(user.username);
+      const family = myFriends.filter(u => u in users);
+      const [selected, setSelected] = useState(family[0] || null);
+      const [text, setText] = useState("");
 
-      useEffect(()=>{
-        if(!selected && family[0]) setSelected(family[0]);
-      },[family]);
+      useEffect(()=> { if(!selected && family[0]) setSelected(family[0]); }, [family]);
 
-      return(
+      const conv = (messages[user.username] && messages[user.username][selected]) || [];
+
+      return (
         <div className="flex flex-col sm:flex-row gap-4">
           <aside className="w-full sm:w-48 bg-white rounded shadow p-2 max-h-[60vh] overflow-y-auto">
             <h4 className="font-semibold mb-2">Family Contacts</h4>
-            {family.length===0 && <div className="text-slate-500">No family contacts. Add family from the Family tab.</div>}
-            {family.map(o=>( 
-              <div key={o} className={`p-3 rounded cursor-pointer flex items-center justify-between ${selected===o?"bg-slate-100":""}`} onClick={()=>setSelected(o)}>
-                <div>{o}{users[o]?.isStar?" ⭐":""}</div>
+            {family.length===0 && <div className="text-slate-500">No family contacts. Add family from Family tab.</div>}
+            {family.map(o => (
+              <div key={o} className={`p-3 rounded cursor-pointer flex items-center justify-between ${selected===o ? 'bg-slate-100' : ''}`} onClick={()=>setSelected(o)}>
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 rounded-full bg-indigo-500 text-white flex items-center justify-center text-sm">{initialsFromName(o)}</div>
+                  <div>{o}{users[o]?.isStar ? " ⭐" : ""}</div>
+                </div>
               </div>
             ))}
           </aside>
@@ -556,16 +784,17 @@
           <section className="flex-1 bg-white rounded shadow p-3 flex flex-col">
             {selected ? (
               <>
-                <div className="flex-1 overflow-y-auto mb-2 max-h-[60vh]">
-                  {((messages[selected]||[]) || []).map((m,i)=>( // show conversation with selected
-                    <div key={i} className={`mb-2 ${m.from===selected?"text-left":"text-right"}`}>
+                <div className="flex-1 overflow-y-auto mb-2 max-h-[60vh] space-y-2">
+                  {conv.map((m,i)=>(
+                    <div key={i} className={`text-sm ${m.from===selected ? 'text-left' : 'text-right'}`}>
                       <div className="inline-block px-3 py-1 rounded text-sm bg-slate-100">{m.from}: {m.text}</div>
                     </div>
                   ))}
                 </div>
-                <form onSubmit={e=>{e.preventDefault(); if(text){sendMessage(selected,text); setText("");}}} className="flex gap-2">
-                  <input className="flex-1 border rounded p-3" placeholder="Message..." value={text} onChange={e=>setText(e.target.value)} />
-                  <button className="px-4 py-2 bg-slate-900 text-white rounded">Send</button>
+
+                <form onSubmit={(e)=>{ e.preventDefault(); if(text){ sendMessage(selected, text); setText(''); } }} className="flex gap-2">
+                  <input value={text} onChange={e=>setText(e.target.value)} className="flex-1 border rounded p-3" placeholder="Message..." />
+                  <button className="px-4 py-2 bg-indigo-600 text-white rounded">Send</button>
                 </form>
               </>
             ) : <div className="text-slate-500">No family selected</div>}
@@ -574,91 +803,573 @@
       )
     }
 
-    // ---- Family (uses friends list). Chat removed from Family page per request. ----
-    function Family({user,timelines,messages,requestAddFamily}){
-      const users=read(USERS_KEY);
-      const myFriends=getFriends(user.username);
-      const [search,setSearch]=useState("");
-      const others=Object.keys(users).filter(u=>u!==user.username && u.includes(search));
+    // ---- Family Page (requests have messages, cards + block/remove) ----
+    function FamilyPage({ user, requestAddFamily, acceptRequest, declineRequest, removeFriendUI, blockUserUI }){
+      const users = read(USERS_KEY);
+      const myFriends = getFriends(user.username);
+      const [search, setSearch] = useState("");
+      const others = Object.keys(users).filter(u => u !== user.username && u.includes(search));
 
-      function add(u){ try{ requestAddFamily(u); }catch(e){ alert(e.message); } }
+      function sendRequest(u){
+        const msg = prompt("Optional message for your request (leave blank for none):", "");
+        requestAddFamily(u, msg || "");
+      }
 
-      return(
+      const pending = getPendingRequests(user.username);
+
+      return (
         <div>
           <h2 className="text-xl font-semibold mb-4">Family</h2>
           <input className="w-full border p-3 rounded mb-4" placeholder="Search users..." value={search} onChange={e=>setSearch(e.target.value)} />
 
-          <ul className="space-y-2 mb-6">
-            {others.map(u=><li key={u} className="bg-white p-3 rounded shadow flex justify-between items-center">
-              <div>
-                <div className="font-medium">{u}{users[u]?.isStar?" ⭐":""}</div>
-                <div className="text-xs text-slate-500">{users[u]?.pendingRequests?.includes(user.username) ? "Request sent" : ""}</div>
-              </div>
-              <div className="flex gap-2">
-                <button onClick={()=>add(u)} className="px-3 py-1 border rounded">{ users[u]?.pendingRequests?.includes(user.username) ? "Requested" : "Add Family" }</button>
-              </div>
-            </li>)}
-          </ul>
+          <div className="mb-6">
+            <h3 className="font-semibold mb-2">People</h3>
+            <ul className="space-y-2">
+              {others.map(u => (
+                <li key={u} className="bg-white p-3 rounded shadow flex justify-between items-center">
+                  <div>
+                    <div className="font-medium">{u}{users[u]?.isStar ? " ⭐" : ""}</div>
+                    <div className="text-xs text-slate-500">{users[u]?.bio}</div>
+                    <div className="text-xs text-slate-400">{users[u]?.pendingRequests?.some(r=>r.from===user.username) ? 'Request sent' : ''}</div>
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={()=>sendRequest(u)} className="px-3 py-1 border rounded">{ users[u]?.pendingRequests?.some(r=>r.from===user.username) ? 'Requested' : 'Add Family' }</button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
 
-          <h3 className="font-bold mb-2">Your Family</h3>
-          {myFriends.length===0 && <div className="text-slate-500">No family yet.</div>}
-          {myFriends.map(f=> <FamilyMember key={f} me={user.username} friend={f} timelines={timelines} messages={messages?.[user.username]?.[f]||[]} />)}
+          <div className="mb-6">
+            <h3 className="font-semibold mb-2">Pending Requests</h3>
+            {pending.length===0 && <div className="text-slate-500">No requests.</div>}
+            <div className="space-y-2">
+              {pending.map(r => (
+                <div key={r.from} className="bg-white p-3 rounded shadow flex items-center gap-3">
+                  <div className="w-12 h-12 rounded-full bg-indigo-500 text-white flex items-center justify-center font-semibold">{initialsFromName(r.from)}</div>
+                  <div className="flex-1">
+                    <div className="font-semibold">{r.from}</div>
+                    {r.message && <div className="text-sm text-slate-600">{r.message}</div>}
+                    <div className="text-xs text-slate-400">{new Date(r.time).toLocaleString()}</div>
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={()=>acceptRequest(r.from)} className="px-3 py-1 bg-green-600 text-white rounded">Accept</button>
+                    <button onClick={()=>declineRequest(r.from)} className="px-3 py-1 border rounded">Decline</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <h3 className="font-semibold mb-2">Your Family</h3>
+            {myFriends.length===0 && <div className="text-slate-500">No family yet.</div>}
+            <div className="space-y-3">
+              {myFriends.map(f => (
+                <div key={f} className="bg-white p-3 rounded shadow flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-full bg-indigo-500 text-white flex items-center justify-center">{initialsFromName(f)}</div>
+                    <div>
+                      <div className="font-semibold">{f}</div>
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={()=>removeFriendUI(f)} className="px-3 py-1 border rounded">Remove</button>
+                    <button onClick={()=>blockUserUI(f)} className="px-3 py-1 border rounded">Block</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
       )
     }
 
-    // helper to avoid lint confusion in template above
-    function meOrUser(u){ return u }
+    // ---- Memory Lane with filters ----
+    function MemoryLanePage({ user, timelines }){
+      const [yearFilter, setYearFilter] = useState('all');
+      const [monthFilter, setMonthFilter] = useState('all');
 
-    function FamilyMember({me,friend,timelines,messages}){
-      const friendTimelines=Object.values(timelines).filter(t=>t.owner===friend && !t.locked);
-      return(
-        <div className="mb-6">
-          <h4 className="font-semibold mb-2">{friend}'s Timelines</h4>
-          {friendTimelines.length===0 && <div className="text-slate-500 mb-4">No visible timelines.</div>}
-          {friendTimelines.map(tl=> <Timeline key={tl.id} timeline={tl} isOwner={false} />)}
-          {/* Chat removed from family page by request */}
-        </div>
-      )
-    }
-
-    // ---- Memory Lane ----
-    function MemoryLane({user,timelines}){
-      const today=new Date();
-      const memories=[];
-      Object.values(timelines).forEach(t=>{
-        t.posts?.forEach(p=>{
-          const d=new Date(p.created);
-          if(d.getDate()===today.getDate() && d.getMonth()===today.getMonth()) memories.push({...p,timeline:t.name});
-        })
+      // collect all posts across timelines
+      const allPosts = [];
+      Object.values(timelines).forEach(t => {
+        (t.posts || []).forEach(p => allPosts.push({ ...p, timeline: t.name }));
       });
-      return(
+
+      const years = [...new Set(allPosts.map(p => new Date(p.created).getFullYear()))].sort((a,b)=>b-a);
+
+      const filtered = allPosts.filter(p => {
+        const d = new Date(p.created);
+        if(yearFilter !== 'all' && d.getFullYear().toString() !== yearFilter) return false;
+        if(monthFilter !== 'all' && (d.getMonth()+1).toString() !== monthFilter) return false;
+        return true;
+      }).sort((a,b)=>b.created - a.created);
+
+      return (
         <div>
           <h2 className="text-xl font-semibold mb-4">Memory Lane</h2>
-          {memories.length===0 && <div className="text-slate-500">No memories today.</div>}
-          {memories.map((m,i)=>( 
-            <div key={i} className="bg-white p-3 rounded shadow mb-2">
-              <div className="text-xs text-slate-500">From {m.timeline}</div>
-              <div>{m.type==="text"?m.content:m.content.name}</div>
-            </div>
-          ))}
+
+          <div className="flex gap-2 mb-4">
+            <select value={yearFilter} onChange={e=>setYearFilter(e.target.value)} className="p-2 border rounded">
+              <option value="all">All years</option>
+              {years.map(y=> <option key={y} value={y}>{y}</option>)}
+            </select>
+            <select value={monthFilter} onChange={e=>setMonthFilter(e.target.value)} className="p-2 border rounded">
+              <option value="all">All months</option>
+              {Array.from({length:12}).map((_,i)=> <option key={i+1} value={(i+1).toString()}>{i+1}</option>)}
+            </select>
+          </div>
+
+          <div className="space-y-3">
+            {filtered.map((m,i)=>(
+              <div key={i} className="bg-white p-3 rounded shadow">
+                <div className="text-xs text-slate-500">From {m.timeline} • {new Date(m.created).toLocaleString()}</div>
+                <div className="mt-1">{m.type==="text" ? m.content : m.content.name}</div>
+              </div>
+            ))}
+            {filtered.length===0 && <div className="text-slate-500">No memories for selected filters.</div>}
+          </div>
         </div>
       )
     }
 
-    // ---- Shop Page ----
+    // ---- Profile Page ----
+    function ProfilePage({ user, updateMyProfile, timelines, handleCreateTimeline }){
+      const [editing, setEditing] = useState(false);
+      const [bio, setBio] = useState(user.bio || "");
+      const [avatarFile, setAvatarFile] = useState(null);
+      const [previewAvatar, setPreviewAvatar] = useState(user.avatar || null);
+      const myTimelines = Object.values(timelines).filter(t => t.owner === user.username);
+
+      function chooseAvatar(e){
+        const f = e.target.files[0];
+        if(!f) return;
+        const reader = new FileReader();
+        reader.onload = () => setPreviewAvatar(reader.result);
+        reader.readAsDataURL(f);
+        setAvatarFile(f);
+      }
+
+      function saveProfile(){
+        if(avatarFile){
+          const reader = new FileReader();
+          reader.onload = ()=> {
+            updateMyProfile({ avatar: reader.result, bio });
+            setEditing(false);
+            setAvatarFile(null);
+          };
+          reader.readAsDataURL(avatarFile);
+        } else {
+          updateMyProfile({ bio });
+          setEditing(false);
+        }
+      }
+
+      return (
+        <div>
+          <div className="bg-white p-4 rounded-2xl shadow flex gap-4 items-center mb-6">
+            <div>
+              {previewAvatar ? <img src={previewAvatar} className="w-20 h-20 rounded-full object-cover" /> : <div className="w-20 h-20 rounded-full bg-indigo-500 text-white flex items-center justify-center font-semibold text-xl">{initialsFromName(user.username)}</div>}
+            </div>
+            <div className="flex-1">
+              <div className="text-2xl font-bold">{user.username} {user.isStar ? '⭐' : ''}</div>
+              <div className="text-sm text-slate-600 mt-1">{user.bio}</div>
+            </div>
+            <div>
+              {!editing ? <button onClick={()=>setEditing(true)} className="px-3 py-1 border rounded">Edit Profile</button> : <></>}
+            </div>
+          </div>
+
+          {editing && (
+            <div className="bg-white p-4 rounded-2xl shadow mb-6">
+              <h3 className="font-semibold mb-2">Edit Profile</h3>
+              <div className="space-y-2">
+                <input type="file" accept="image/*" onChange={chooseAvatar} />
+                <textarea value={bio} onChange={e=>setBio(e.target.value)} className="w-full p-2 border rounded" placeholder="Bio" />
+                <div className="flex gap-2">
+                  <button onClick={saveProfile} className="px-3 py-1 bg-indigo-600 text-white rounded">Save</button>
+                  <button onClick={()=>{ setEditing(false); setPreviewAvatar(user.avatar); setAvatarFile(null); }} className="px-3 py-1 border rounded">Cancel</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="mb-6">
+            <h3 className="font-semibold mb-2">Your Timelines</h3>
+            {myTimelines.length===0 && <div className="text-slate-500">No timelines yet.</div>}
+            <div className="space-y-3">
+              {myTimelines.map(t => (
+                <div key={t.id} className="bg-white p-3 rounded shadow flex justify-between items-center">
+                  <div>
+                    <div className="font-semibold">{t.name}</div>
+                    <div className="text-xs text-slate-500">{t.posts?.length || 0} posts</div>
+                  </div>
+                  <div className="text-xs text-slate-400">{new Date(t.created).toLocaleDateString()}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )
+    }
+
     function Shop(){
       return (
-        <div className="bg-white p-6 rounded shadow text-center">
+        <div className="bg-white p-6 rounded-2xl shadow text-center">
           <h2 className="text-xl font-semibold mb-3">Shop</h2>
-          <div className="text-slate-500">to come...</div>
+          <div className="text-slate-500">Coming soon…</div>
         </div>
       )
     }
 
-    ReactDOM.createRoot(document.getElementById("root")).render(<MomentsApp/>);
+    // ---- Render app and expose import function to header ----
+    ReactDOM.createRoot(document.getElementById('root')).render(<AppWrapper />);
+
+    function AppWrapper(){
+      // AppWrapper exists so we can give header the importData handler via global
+      const [importHandler, setImportHandler] = useState(null);
+
+      function setGlobalImport(fn){
+        window.__MOMENTS_IMPORT = fn;
+      }
+
+      return <MainApp setGlobalImport={setGlobalImport} />;
+    }
+
+    function MainApp({ setGlobalImport }){
+      // We need to render MomentsApp and provide importData to header via global
+      // We'll create a small wrapper that sets window.__MOMENTS_IMPORT when MomentsApp mounts.
+      const [mountKey, setMountKey] = useState(0);
+
+      return (
+        <MomentsAppWithImport setGlobalImport={setGlobalImport} key={mountKey} />
+      )
+    }
+
+    function MomentsAppWithImport({ setGlobalImport }){
+      // We'll render MomentsApp normally but capture its importData function by attaching to window from within MomentsApp.
+      // To avoid complex ref forwarding, we will render MomentsApp and then patch window.__MOMENTS_IMPORT inside a small effect by retrieving the importData function using a DOM event.
+      // Simpler: We'll attach a listener that MomentsApp will call via a custom event when it has importData ready.
+
+      // Render MomentsApp and listen for a custom event to set import handler:
+      useEffect(()=>{
+        function onSetImport(e){
+          if(e && e.detail && typeof e.detail.importHandler === 'function'){
+            window.__MOMENTS_IMPORT = e.detail.importHandler;
+          }
+        }
+        window.addEventListener('moments-set-import', onSetImport);
+        return ()=> window.removeEventListener('moments-set-import', onSetImport);
+      },[]);
+
+      // Render real app. The MomentsApp component will dispatch the event with importData when it mounts.
+      return <MomentsAppWithImportInner />;
+    }
+
+    function MomentsAppWithImportInner(){
+      // This is almost identical to MomentsApp above but we will dispatch the import handler event when mount happens.
+      const [user, setUser] = useState(null);
+      const [timelines, setTimelines] = useState(readTimelinesObj());
+      const [messages, setMessages] = useState(readMessages());
+      const [view, setView] = useState("timelines");
+      const [theme, setTheme] = useState(localStorage.getItem(THEME_KEY) || "light");
+      const channelRef = useRef(null);
+      const [notifCounts, setNotifCounts] = useState({requests:0, messages:0});
+
+      // same logic as MomentsApp above but simpler re-used functions:
+      useEffect(()=>{
+        const sess = currentSession();
+        if(sess?.username){
+          const users = read(USERS_KEY);
+          if(users[sess.username]) setUser(users[sess.username]);
+        }
+        setTimelines(readTimelinesObj());
+        setMessages(readMessages());
+      },[]);
+
+      useEffect(()=>{
+        try{
+          channelRef.current = new BroadcastChannel("moments_channel");
+          channelRef.current.onmessage = (e) => {
+            if(e.data.type === "users_update"){
+              const sess = currentSession();
+              if(sess?.username){
+                const users = read(USERS_KEY);
+                if(users[sess.username]) setUser(users[sess.username]);
+              }
+            }
+            if(e.data.type === "timelines_update"){
+              setTimelines(readTimelinesObj());
+            }
+            if(e.data.type === "messages_update"){
+              setMessages(readMessages());
+            }
+          };
+        }catch(e){}
+        return ()=>{ if(channelRef.current) channelRef.current.close(); };
+      },[]);
+
+      useEffect(()=>{
+        document.documentElement.classList.toggle('dark', theme === 'dark');
+        localStorage.setItem(THEME_KEY, theme);
+      },[theme]);
+
+      useEffect(()=>{
+        if(!user) { setNotifCounts({requests:0,messages:0}); return; }
+        const pending = getPendingRequests(user.username) || [];
+        const msgsToUser = readMessages()[user.username] || {};
+        let unread = 0;
+        Object.values(msgsToUser).forEach(arr => unread += arr.length);
+        setNotifCounts({requests: pending.length, messages: unread});
+      },[user, messages]);
+
+      // export/import handlers:
+      function exportData(){
+        const exportObj = {
+          users: read(USERS_KEY),
+          timelines: readTimelinesObj(),
+          messages: readMessages()
+        };
+        const blob = new Blob([JSON.stringify(exportObj, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `moments-export-${new Date().toISOString().slice(0,10)}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+      function importData(file){
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          try{
+            const parsed = JSON.parse(e.target.result);
+            if(parsed.users) write(USERS_KEY, parsed.users);
+            if(parsed.timelines) write(TIMELINES_KEY, parsed.timelines);
+            if(parsed.messages) write(MESSAGES_KEY, parsed.messages);
+            setTimelines(readTimelinesObj());
+            setMessages(readMessages());
+            const sess = currentSession();
+            if(sess?.username){
+              const users = read(USERS_KEY);
+              if(users[sess.username]) setUser(users[sess.username]);
+            }
+            alert('Import complete.');
+            // broadcast
+            try{ if(channelRef.current) channelRef.current.postMessage({type:'timelines_update'}); }catch(e){}
+            try{ if(channelRef.current) channelRef.current.postMessage({type:'messages_update'}); }catch(e){}
+            try{ if(channelRef.current) channelRef.current.postMessage({type:'users_update'}); }catch(e){}
+          }catch(err){ alert('Import failed: invalid JSON'); }
+        };
+        reader.readAsText(file);
+      }
+
+      // Dispatch import handler to global so header's import button can call it
+      useEffect(()=> {
+        const ev = new CustomEvent('moments-set-import', { detail: { importHandler: importData }});
+        window.dispatchEvent(ev);
+        // also set global directly for older browsers
+        window.__MOMENTS_IMPORT = importData;
+      }, []);
+
+      // helper wrappers for child components (like earlier MomentsApp)
+      function broadcastUsersUpdate(){ if(channelRef.current) channelRef.current.postMessage({type:'users_update'}); }
+      function broadcastTimelinesUpdate(){ if(channelRef.current) channelRef.current.postMessage({type:'timelines_update'}); }
+      function broadcastMessagesUpdate(){ if(channelRef.current) channelRef.current.postMessage({type:'messages_update'}); }
+
+      // Timeline helpers (same as before)
+      function handleCreateTimeline(name, iconFile){
+        const reader = new FileReader();
+        reader.onload = () => {
+          const newT = { id: uid(), name, owner: user.username, posts: [], locked: false, icon: reader.result, created: Date.now() };
+          const tl = readTimelinesObj();
+          tl[newT.id] = newT;
+          saveTimelinesObj(tl);
+          setTimelines(tl);
+          broadcastTimelinesUpdate();
+        };
+        if(iconFile) reader.readAsDataURL(iconFile);
+        else {
+          const newT = { id: uid(), name, owner: user.username, posts: [], locked: false, icon: null, created: Date.now() };
+          const tl = readTimelinesObj();
+          tl[newT.id] = newT;
+          saveTimelinesObj(tl);
+          setTimelines(tl);
+          broadcastTimelinesUpdate();
+        }
+      }
+      function handleAddPost(tid, content, type){
+        const tl = readTimelinesObj();
+        const t = {...tl[tid]};
+        t.posts = t.posts || [];
+        t.posts.unshift({ id: uid(), owner: user.username, type, content, created: Date.now() });
+        tl[tid] = t;
+        saveTimelinesObj(tl);
+        setTimelines(tl);
+        broadcastTimelinesUpdate();
+      }
+      function handleDeletePost(tid, pid){
+        const tl = readTimelinesObj();
+        const t = {...tl[tid], posts: (tl[tid].posts || []).filter(p=>p.id!==pid)};
+        tl[tid] = t;
+        saveTimelinesObj(tl);
+        setTimelines(tl);
+        broadcastTimelinesUpdate();
+      }
+      function toggleLock(tid){
+        const tl = readTimelinesObj();
+        const t = {...tl[tid], locked: !tl[tid].locked};
+        tl[tid] = t;
+        saveTimelinesObj(tl);
+        setTimelines(tl);
+        broadcastTimelinesUpdate();
+      }
+
+      // messaging
+      function sendMessage(to, text){
+        const m = readMessages();
+        if(!m[to]) m[to] = {};
+        if(!m[to][user.username]) m[to][user.username] = [];
+        if(!m[user.username]) m[user.username] = {};
+        if(!m[user.username][to]) m[user.username][to] = [];
+        const msg = { from: user.username, to, text, time: Date.now() };
+        m[user.username][to].push(msg);
+        m[to][user.username].push(msg);
+        writeMessages(m);
+        setMessages(m);
+        broadcastMessagesUpdate();
+      }
+
+      // profile update
+      function updateMyProfile(patch){
+        const users = read(USERS_KEY);
+        if(!users[user.username]) return;
+        users[user.username] = ensureUserShape({ ...users[user.username], ...patch });
+        write(USERS_KEY, users);
+        setUser(users[user.username]);
+        broadcastUsersUpdate();
+      }
+
+      // friend / block wrappers
+      function requestAddFamily(targetUsername, message=""){
+        try{
+          sendFriendRequest(user.username, targetUsername, message);
+          broadcastUsersUpdate();
+          alert("Friend request sent.");
+        }catch(e){ alert(e.message); }
+      }
+      function acceptRequest(fromUser){
+        acceptFriendRequest(user.username, fromUser);
+        broadcastUsersUpdate();
+      }
+      function declineRequest(fromUser){
+        declineFriendRequest(user.username, fromUser);
+        broadcastUsersUpdate();
+      }
+      function removeFriendUI(friend){
+        removeFriend(user.username, friend);
+        broadcastUsersUpdate();
+      }
+      function blockUserUI(blockedUser){
+        blockUser(user.username, blockedUser);
+        broadcastUsersUpdate();
+      }
+
+      // export wrapper
+      function exportHandler(){ 
+        const exportObj = { users: read(USERS_KEY), timelines: readTimelinesObj(), messages: readMessages() };
+        const blob = new Blob([JSON.stringify(exportObj, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `moments-export-${new Date().toISOString().slice(0,10)}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+
+      // simple import wrapper for header
+      function importHandler(file){
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          try{
+            const parsed = JSON.parse(e.target.result);
+            if(parsed.users) write(USERS_KEY, parsed.users);
+            if(parsed.timelines) write(TIMELINES_KEY, parsed.timelines);
+            if(parsed.messages) write(MESSAGES_KEY, parsed.messages);
+            setTimelines(readTimelinesObj());
+            setMessages(readMessages());
+            const sess = currentSession();
+            if(sess?.username){
+              const users = read(USERS_KEY);
+              if(users[sess.username]) setUser(users[sess.username]);
+            }
+            alert('Import complete.');
+            broadcastTimelinesUpdate();
+            broadcastMessagesUpdate();
+            broadcastUsersUpdate();
+          }catch(err){ alert('Import failed: invalid JSON'); }
+        };
+        reader.readAsText(file);
+      }
+
+      // publish import handler via event/global (so Header's import can call it)
+      useEffect(()=> {
+        const ev = new CustomEvent('moments-set-import', { detail: { importHandler }});
+        window.dispatchEvent(ev);
+        window.__MOMENTS_IMPORT = importHandler;
+      }, []);
+
+      // Render header and main content
+      return user ? (
+        <div className="min-h-screen">
+          <Header
+            user={user}
+            onSignOut={()=>{ signOut(); window.location.reload(); }}
+            notifCounts={{ requests: (getPendingRequests(user.username)||[]).length, messages: 0 }}
+            setView={setView}
+            theme={theme}
+            setTheme={setTheme}
+            exportData={exportHandler}
+            importData={importHandler}
+            messages={messages}
+          />
+
+          <div className="p-4 max-w-6xl mx-auto">
+            <div className="flex flex-col sm:flex-row gap-4">
+              <nav className="flex sm:flex-col gap-2 sm:w-48 w-full">
+                <NavButton active={view==="timelines"} onClick={()=>setView("timelines")}>Timelines</NavButton>
+                <NavButton active={view==="feed"} onClick={()=>setView("feed")}>Feed</NavButton>
+                <NavButton active={view==="chat"} onClick={()=>setView("chat")}>Chat</NavButton>
+                <NavButton active={view==="family"} onClick={()=>setView("family")}>Family</NavButton>
+                <NavButton active={view==="memory"} onClick={()=>setView("memory")}>Memory Lane</NavButton>
+                <NavButton active={view==="profile"} onClick={()=>setView("profile")}>Profile</NavButton>
+                <NavButton active={view==="shop"} onClick={()=>setView("shop")}>Shop</NavButton>
+              </nav>
+
+              <main className="flex-1">
+                {view==="timelines" && <TimelinesPage user={user} timelines={timelines} handleCreateTimeline={handleCreateTimeline} handleAddPost={handleAddPost} handleDeletePost={handleDeletePost} toggleLock={toggleLock} />}
+                {view==="feed" && <Feed user={user} timelines={timelines} />}
+                {view==="chat" && <Chat user={user} messages={messages} sendMessage={sendMessage} />}
+                {view==="family" && <FamilyPage user={user} requestAddFamily={requestAddFamily} acceptRequest={acceptRequest} declineRequest={declineRequest} removeFriendUI={removeFriendUI} blockUserUI={blockUserUI} />}
+                {view==="memory" && <MemoryLanePage user={user} timelines={timelines} />}
+                {view==="profile" && <ProfilePage user={user} updateMyProfile={updateMyProfile} timelines={timelines} handleCreateTimeline={handleCreateTimeline} />}
+                {view==="shop" && <Shop />}
+              </main>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <AuthPanel setUser={async (u) => { const users = read(USERS_KEY); if(users[u.username]) { setUser(users[u.username]); } }} />
+      );
+    }
+
+    // Helper references used inside MomentsAppWithImportInner that were referenced earlier but defined later
+    function sendFriendRequest(from, to, message=""){ return window._sendFriendRequestImpl ? window._sendFriendRequestImpl(from,to,message) : (function(){ const users = read(USERS_KEY); if(!users[to]) throw new Error('no such user'); users[to]=ensureUserShape(users[to]); users[to].pendingRequests = users[to].pendingRequests || []; if(!users[to].pendingRequests.find(r=>r.from===from) && !users[to].friends.includes(from)){ users[to].pendingRequests.push({from,message,time:Date.now()}); write(USERS_KEY,users); } })(); }
+    function acceptFriendRequest(acceptor, fromUser){ const users = read(USERS_KEY); if(!users[acceptor] || !users[fromUser]) return; users[acceptor].pendingRequests = (users[acceptor].pendingRequests || []).filter(r=>r.from!==fromUser); if(!users[acceptor].friends.includes(fromUser)) users[acceptor].friends.push(fromUser); if(!users[fromUser].friends.includes(acceptor)) users[fromUser].friends.push(acceptor); write(USERS_KEY, users); }
+    function declineFriendRequest(decliner, fromUser){ const users = read(USERS_KEY); if(!users[decliner]) return; users[decliner].pendingRequests = (users[decliner].pendingRequests || []).filter(r=>r.from!==fromUser); write(USERS_KEY, users); }
+    function removeFriend(user, friend){ const users = read(USERS_KEY); if(!users[user] || !users[friend]) return; users[user].friends = (users[user].friends || []).filter(f=>f!==friend); users[friend].friends = (users[friend].friends || []).filter(f=>f!==user); write(USERS_KEY, users); }
+    function blockUser(blocker, blockedUser){ const users = read(USERS_KEY); if(!users[blocker] || !users[blockedUser]) return; users[blocker].blocked = users[blocker].blocked || []; if(!users[blocker].blocked.includes(blockedUser)) users[blocker].blocked.push(blockedUser); users[blocker].friends = users[blocker].friends.filter(f=>f!==blockedUser); users[blockedUser].friends = users[blockedUser].friends.filter(f=>f!==blocker); users[blocker].pendingRequests = (users[blocker].pendingRequests || []).filter(r=>r.from!==blockedUser); write(USERS_KEY, users); }
+
   </script>
 </body>
 </html>
-
 
