@@ -25,7 +25,8 @@
     function read(key){ try{return JSON.parse(localStorage.getItem(key))||{}}catch{return{}} }
     function write(key,val){ localStorage.setItem(key,JSON.stringify(val)); }
 
-    // ---- Users ----
+    // ---- Auth & Users ----
+    // Users structure: { username: { username, password, id, friends:[], pendingRequests:[], isStar:false } }
     function ensureUserShape(u){
       if(!u.friends) u.friends=[];
       if(!u.pendingRequests) u.pendingRequests=[];
@@ -48,11 +49,13 @@
     function signOut(){ localStorage.removeItem(SESSION_KEY); }
     function currentSession(){ return read(SESSION_KEY); }
 
-    // ---- Friend Requests ----
+    // Friend requests and family
     function sendFriendRequest(from, to){
       const users = read(USERS_KEY);
       if(!users[to]) throw new Error("no such user");
       users[to] = ensureUserShape(users[to]);
+      // avoid duplicates
+      users[to].pendingRequests = users[to].pendingRequests || [];
       if(!users[to].pendingRequests.includes(from) && !users[to].friends.includes(from)){
         users[to].pendingRequests.push(from);
         write(USERS_KEY,users);
@@ -61,9 +64,7 @@
     function acceptFriendRequest(acceptor, fromUser){
       const users = read(USERS_KEY);
       if(!users[acceptor] || !users[fromUser]) return;
-      users[acceptor] = ensureUserShape(users[acceptor]);
-      users[fromUser] = ensureUserShape(users[fromUser]);
-      users[acceptor].pendingRequests = (users[acceptor].pendingRequests||[]).filter(u=>u!==fromUser);
+      users[acceptor].pendingRequests = (users[acceptor].pendingRequests || []).filter(u=>u!==fromUser);
       if(!users[acceptor].friends.includes(fromUser)) users[acceptor].friends.push(fromUser);
       if(!users[fromUser].friends.includes(acceptor)) users[fromUser].friends.push(acceptor);
       write(USERS_KEY,users);
@@ -71,10 +72,22 @@
     function declineFriendRequest(decliner, fromUser){
       const users = read(USERS_KEY);
       if(!users[decliner]) return;
-      users[decliner] = ensureUserShape(users[decliner]);
-      users[decliner].pendingRequests = (users[decliner].pendingRequests||[]).filter(u=>u!==fromUser);
+      users[decliner].pendingRequests = (users[decliner].pendingRequests || []).filter(u=>u!==fromUser);
       write(USERS_KEY,users);
     }
+    function removeFriend(user, friend){
+      const users = read(USERS_KEY);
+      if(!users[user] || !users[friend]) return;
+      users[user].friends = (users[user].friends || []).filter(f=>f!==friend);
+      users[friend].friends = (users[friend].friends || []).filter(f=>f!==user);
+      write(USERS_KEY,users);
+    }
+
+    function addFriendImmediate(user,friend){
+      // Kept for backward compatibility if used internally; will make them mutual
+      acceptFriendRequest(user, friend);
+    }
+
     function getFriends(user){ const users=read(USERS_KEY); return users[user]?.friends||[]; }
     function getPendingRequests(user){ const users=read(USERS_KEY); return users[user]?.pendingRequests||[]; }
 
@@ -86,6 +99,7 @@
       const [messages,setMessages]=useState(read(MESSAGES_KEY));
       const channelRef=useRef(null);
 
+      // restore session
       useEffect(()=>{
         const session=currentSession();
         if(session?.username){
@@ -94,6 +108,7 @@
         }
       },[]);
 
+      // broadcast for local multi-tab testing
       useEffect(()=>{
         channelRef.current=new BroadcastChannel("moments_channel");
         channelRef.current.onmessage=(e)=>{
@@ -111,6 +126,7 @@
             setTimelines(read(TIMELINES_KEY));
           }
           if(e.data.type==="users_update"){
+            // update local user replica if necessary
             const session=currentSession();
             if(session?.username){
               const users=read(USERS_KEY);
@@ -124,6 +140,11 @@
       function saveTimelines(updated){
         setTimelines(updated); write(TIMELINES_KEY,updated);
         if(channelRef.current) channelRef.current.postMessage({type:"timelines_update"});
+      }
+
+      function saveUsers(usersObj){
+        write(USERS_KEY, usersObj);
+        if(channelRef.current) channelRef.current.postMessage({type:"users_update"});
       }
 
       function handleCreateTimeline(name,iconFile){
@@ -161,146 +182,287 @@
         saveTimelines(updated);
       }
 
+      function sendMessage(to,text){
+        // messages are allowed but Chat page shows only family contacts.
+        const msg={from:user.username,to,text,time:Date.now()};
+        const m={...messages};
+        if(!m[user.username]) m[user.username]={};
+        if(!m[user.username][to]) m[user.username][to]=[];
+        m[user.username][to].push(msg);
+
+        if(!m[to]) m[to]={};
+        if(!m[to][user.username]) m[to][user.username]=[];
+        m[to][user.username].push(msg);
+
+        setMessages(m); write(MESSAGES_KEY,m);
+        if(channelRef.current) channelRef.current.postMessage({type:"message",to,from:user.username,msg});
+      }
+
+      // friend request helpers
       function requestAddFamily(targetUsername){
         try{
-          sendFriendRequest(user.username,targetUsername);
+          sendFriendRequest(user.username, targetUsername);
+          const users = read(USERS_KEY);
+          // notify by immediate save
+          write(USERS_KEY, users);
           if(channelRef.current) channelRef.current.postMessage({type:"users_update"});
           alert("Friend request sent.");
         }catch(e){ alert(e.message); }
       }
       function acceptRequest(fromUser){
-        acceptFriendRequest(user.username,fromUser);
+        acceptFriendRequest(user.username, fromUser);
+        const users = read(USERS_KEY);
+        write(USERS_KEY, users);
         if(channelRef.current) channelRef.current.postMessage({type:"users_update"});
-        setUser(read(USERS_KEY)[user.username]);
+        // update local user state
+        const session = currentSession();
+        if(session?.username) setUser(read(USERS_KEY)[session.username]);
       }
       function declineRequest(fromUser){
-        declineFriendRequest(user.username,fromUser);
+        declineFriendRequest(user.username, fromUser);
+        const users = read(USERS_KEY);
+        write(USERS_KEY, users);
         if(channelRef.current) channelRef.current.postMessage({type:"users_update"});
-        setUser(read(USERS_KEY)[user.username]);
-      }
-
-      function sendMessage(to,text){
-        const msg={from:user.username,text,created:Date.now()};
-        setMessages(prev=>{
-          const m={...prev};
-          if(!m[user.username]) m[user.username]={};
-          if(!m[user.username][to]) m[user.username][to]=[];
-          m[user.username][to].push(msg);
-          write(MESSAGES_KEY,m);
-          return m;
-        });
-        if(channelRef.current) channelRef.current.postMessage({type:"message",to,from:user.username,msg});
+        const session = currentSession();
+        if(session?.username) setUser(read(USERS_KEY)[session.username]);
       }
 
       return user
-        ? <Dashboard user={user} setUser={setUser} view={view} setView={setView}
-            timelines={timelines} handleCreateTimeline={handleCreateTimeline}
-            handleAddPost={handleAddPost} handleDeletePost={handleDeletePost}
-            toggleLock={toggleLock} requestAddFamily={requestAddFamily}
-            acceptRequest={acceptRequest} declineRequest={declineRequest}
-            messages={messages} sendMessage={sendMessage}/>
+        ? <Dashboard user={user} setUser={setUser} view={view} setView={setView} timelines={timelines} messages={messages} sendMessage={sendMessage} handleCreateTimeline={handleCreateTimeline} handleAddPost={handleAddPost} handleDeletePost={handleDeletePost} toggleLock={toggleLock} requestAddFamily={requestAddFamily} acceptRequest={acceptRequest} declineRequest={declineRequest} saveUsers={saveUsers} />
         : <AuthPanel setUser={setUser} />;
     }
 
-    // ---- Auth Panel ----
+    // ---- Auth Panel with Star Program flow ----
     function AuthPanel({setUser}){
       const [mode,setMode]=useState("signin");
       const [u,setU]=useState(""),[p,setP]=useState(""),[err,setErr]=useState("");
+      const [isStar,setIsStar]=useState(false);
+      const [showWarning,setShowWarning]=useState(false);
+
       function submit(e){ e.preventDefault();
         try{
-          if(mode==="signup"){ createAccount(u,p,false); }
+          if(mode==="signup"){
+            if(isStar){
+              // show warning modal and require confirmation
+              setShowWarning(true);
+              return;
+            }
+            createAccount(u,p,false);
+          }
+          signIn(u,p);
+          // refresh session
+          setUser(read(USERS_KEY)[u]);
+        }catch(e){setErr(e.message);}      }
+
+      function confirmStarSignup(){
+        try{
+          createAccount(u,p,true);
           signIn(u,p);
           setUser(read(USERS_KEY)[u]);
-        }catch(e){setErr(e.message);} }
+          setShowWarning(false);
+        }catch(e){setErr(e.message); setShowWarning(false);}      }
+
       return(
         <div className="p-6 bg-white rounded-xl shadow max-w-md mx-auto mt-12">
           <h2 className="text-xl font-bold mb-3">{mode==="signin"?"Sign In":"Create Account"}</h2>
           <form onSubmit={submit} className="space-y-2">
             <input className="w-full p-3 border rounded" placeholder="username" value={u} onChange={e=>setU(e.target.value)} />
             <input className="w-full p-3 border rounded" placeholder="password" type="password" value={p} onChange={e=>setP(e.target.value)} />
+            {mode==="signup" && (
+              <label className="flex items-center gap-2">
+                <input type="checkbox" checked={isStar} onChange={e=>setIsStar(e.target.checked)} />
+                Join the Star Program (public visibility for unlocked posts)
+              </label>
+            )}
             {err && <div className="text-red-600 text-sm">{err}</div>}
             <button className="w-full px-3 py-2 bg-slate-900 text-white rounded">{mode==="signin"?"Sign in":"Sign up"}</button>
           </form>
+
           <button onClick={()=>setMode(mode==="signin"?"signup":"signin")} className="w-full mt-3 px-3 py-2 border rounded">{mode==="signin"?"Need an account? Sign up":"Have an account? Sign in"}</button>
+
+          {/* Warning modal for Star Program signup */}
+          {showWarning && (
+            <div className="fixed inset-0 flex items-center justify-center bg-black/40 p-4">
+              <div className="bg-white rounded p-4 max-w-md w-full">
+                <h3 className="font-bold mb-2">Star Program — public visibility</h3>
+                <p className="text-sm mb-3">By joining the Star Program, any timeline posts you leave unlocked will be visible to everyone (this site is local-only for testing, but unlocked posts are public to all users on this device). Are you sure you want to continue?</p>
+                <div className="flex gap-2 justify-end">
+                  <button onClick={()=>setShowWarning(false)} className="px-3 py-1 border rounded">Cancel</button>
+                  <button onClick={confirmStarSignup} className="px-3 py-1 bg-amber-500 text-black rounded">Yes, join Star Program</button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )
     }
 
-    // ---- Dashboard ----
-    function Dashboard({user,setUser,view,setView,timelines,handleCreateTimeline,handleAddPost,handleDeletePost,toggleLock,requestAddFamily,acceptRequest,declineRequest,messages,sendMessage}){
+    // ---- Dashboard with tabs: Timelines / Feed / Chat / Family / Memory Lane / Shop ----
+    function Dashboard({user,setUser,view,setView,timelines,messages,sendMessage,handleCreateTimeline,handleAddPost,handleDeletePost,toggleLock,requestAddFamily,acceptRequest,declineRequest,saveUsers}){
+      const [showRequests,setShowRequests]=useState(false);
+      const users=read(USERS_KEY);
+      const pending = getPendingRequests(user.username);
+
+      function signout(){
+        signOut();
+        setUser(null);
+      }
+
       return(
         <div className="p-4 max-w-6xl mx-auto">
-          <h1 className="text-2xl font-bold mb-6">Moments</h1>
-          <nav className="flex gap-2 mb-4">
-            <button onClick={()=>setView("timelines")} className={`px-3 py-2 rounded ${view==="timelines"?"bg-slate-900 text-white":"border"}`}>Timelines</button>
-            <button onClick={()=>setView("family")} className={`px-3 py-2 rounded ${view==="family"?"bg-slate-900 text-white":"border"}`}>Family</button>
-            <button onClick={()=>setView("chat")} className={`px-3 py-2 rounded ${view==="chat"?"bg-slate-900 text-white":"border"}`}>Chat</button>
-          </nav>
-          {view==="timelines" && <Timelines user={user} timelines={timelines} handleCreateTimeline={handleCreateTimeline} handleAddPost={handleAddPost} handleDeletePost={handleDeletePost} toggleLock={toggleLock} />}
-          {view==="family" && <Family user={user} requestAddFamily={requestAddFamily} acceptRequest={acceptRequest} declineRequest={declineRequest} />}
-          {view==="chat" && <Chat user={user} messages={messages} sendMessage={sendMessage} />}
-          <div className="mt-4">Hello, <b>{user.username}</b></div>
+          <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center mb-6 gap-3">
+            <div className="flex items-center gap-3">
+              <h1 className="text-2xl font-bold">Moments</h1>
+              <span className="text-sm text-slate-500">Made by Leo</span>
+            </div>
+            <div className="flex gap-3 items-center">
+              <div className="hidden sm:block">Hello, <b>{user.username}</b>{user.isStar?" ⭐":""}</div>
+              <button onClick={()=>setShowRequests(true)} className="px-3 py-2 border rounded flex items-center gap-2">
+                Requests {pending.length>0 && <span className="text-xs bg-amber-500 text-black px-2 py-0.5 rounded">{pending.length}</span>}
+              </button>
+              <button onClick={signout} className="px-3 py-2 border rounded">Sign out</button>
+            </div>
+          </div>
+
+          <div className="flex flex-col sm:flex-row gap-4">
+            <nav className="flex sm:flex-col gap-2 sm:w-48 w-full">
+              <button onClick={()=>setView("timelines")} className={`px-3 py-3 rounded text-left ${view==="timelines"?"bg-slate-900 text-white":"border"}`}>Timelines</button>
+              <button onClick={()=>setView("feed")} className={`px-3 py-3 rounded text-left ${view==="feed"?"bg-slate-900 text-white":"border"}`}>Feed</button>
+              <button onClick={()=>setView("chat")} className={`px-3 py-3 rounded text-left ${view==="chat"?"bg-slate-900 text-white":"border"}`}>Chat</button>
+              <button onClick={()=>setView("family")} className={`px-3 py-3 rounded text-left ${view==="family"?"bg-slate-900 text-white":"border"}`}>Family</button>
+              <button onClick={()=>setView("memory")} className={`px-3 py-3 rounded text-left ${view==="memory"?"bg-slate-900 text-white":"border"}`}>Memory Lane</button>
+              <button onClick={()=>setView("shop")} className={`px-3 py-3 rounded text-left ${view==="shop"?"bg-slate-900 text-white":"border"}`}>Shop</button>
+            </nav>
+
+            <main className="flex-1">
+              {view==="timelines" && <Timelines user={user} timelines={timelines} handleCreateTimeline={handleCreateTimeline} handleAddPost={handleAddPost} handleDeletePost={handleDeletePost} toggleLock={toggleLock} />}
+              {view==="feed" && <Feed user={user} timelines={timelines} />}
+              {view==="chat" && <Chat user={user} messages={messages} sendMessage={sendMessage} />}
+              {view==="family" && <Family user={user} timelines={timelines} messages={messages} requestAddFamily={requestAddFamily} />}
+              {view==="memory" && <MemoryLane user={user} timelines={timelines} />}
+              {view==="shop" && <Shop />}
+            </main>
+          </div>
+
+          {/* Friend requests modal */}
+          {showRequests && (
+            <div className="fixed inset-0 flex items-center justify-center bg-black/40 p-4 z-50">
+              <div className="bg-white rounded p-4 max-w-md w-full">
+                <h3 className="font-bold mb-3">Friend Requests</h3>
+                {pending.length===0 && <div className="text-slate-500">No requests.</div>}
+                <div className="space-y-2 max-h-64 overflow-y-auto">
+                  {pending.map((from)=>
+                    <div key={from} className="flex items-center justify-between bg-slate-50 p-2 rounded">
+                      <div>{from}</div>
+                      <div className="flex gap-2">
+                        <button onClick={()=>{acceptRequest(from);}} className="px-3 py-1 bg-green-600 text-white rounded">Accept</button>
+                        <button onClick={()=>{declineRequest(from);}} className="px-3 py-1 border rounded">Decline</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+                <div className="mt-3 flex justify-end">
+                  <button onClick={()=>setShowRequests(false)} className="px-3 py-1 border rounded">Close</button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )
     }
 
-    // ---- Timelines ----
+    // ---- Timelines (unchanged behaviour, keep lock control) ----
     function Timelines({user,timelines,handleCreateTimeline,handleAddPost,handleDeletePost,toggleLock}){
-      const [name,setName]=useState(""), [iconFile,setIconFile]=useState(null);
+      const [name,setName]=useState("");
+      const [iconFile,setIconFile]=useState(null);
       const myT=Object.values(timelines).filter(t=>t.owner===user.username);
       return(
         <div>
-          <div className="flex gap-2 mb-4">
-            <input className="flex-1 p-2 border rounded" placeholder="New timeline name" value={name} onChange={e=>setName(e.target.value)} />
-            <input type="file" accept="image/*" onChange={e=>setIconFile(e.target.files[0])} />
-            <button onClick={()=>{if(name){handleCreateTimeline(name,iconFile);setName("");setIconFile(null);}}} className="px-3 py-2 bg-slate-900 text-white rounded">Create</button>
+          <h2 className="text-xl font-semibold mb-4">Your Timelines</h2>
+          <div className="flex flex-col sm:flex-row gap-2 mb-4">
+            <input className="flex-1 p-3 border rounded" placeholder="New timeline name" value={name} onChange={e=>setName(e.target.value)} />
+            <input type="file" accept="image/*" onChange={e=>setIconFile(e.target.files[0])} className="py-2" />
+            <button onClick={()=>{if(name){handleCreateTimeline(name,iconFile);setName("");setIconFile(null);}}} className="px-4 py-2 bg-slate-900 text-white rounded">Create</button>
           </div>
-          {myT.map(t=><Timeline key={t.id} timeline={t} isOwner handleAddPost={handleAddPost} handleDeletePost={handleDeletePost} toggleLock={toggleLock} />)}
+          <div className="grid gap-4">
+            {myT.map(t=><Timeline key={t.id} timeline={t} isOwner handleAddPost={handleAddPost} handleDeletePost={handleDeletePost} toggleLock={toggleLock} />)}
+          </div>
         </div>
       )
     }
 
     function Timeline({timeline,isOwner,handleAddPost,handleDeletePost,toggleLock}){
-      const [text,setText]=useState(""), [file,setFile]=useState(null), [open,setOpen]=useState(false);
-      function handleUpload(){
-        if(!file) return;
-        const reader=new FileReader();
-        reader.onload=()=>{ handleAddPost(timeline.id,{name:file.name,type:file.type,url:reader.result},"file"); setFile(null); };
-        reader.readAsDataURL(file);
-      }
+      const [text,setText]=useState("");
+      const [file,setFile]=useState(null);
+      const [open,setOpen]=useState(false);
+
       return(
         <div className="bg-white p-4 rounded-xl shadow mb-4">
-          <div className="flex justify-between items-center">
-            <div className="flex items-center gap-2 cursor-pointer" onClick={()=>setOpen(!open)}>
-              {open ? (
-                <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+          <div className="flex justify-between items-center mb-2">
+            <div className="flex items-center gap-2">
+              <button aria-label={open?"Close timeline":"Open timeline"} onClick={()=>setOpen(!open)} className="p-2 rounded hover:bg-slate-100 transform transition-transform duration-200">
+                {/* Sleeker SVG chevron instead of plain arrows */}
+                <svg className={`w-5 h-5 text-slate-700 transform transition-transform duration-200 ${open?"rotate-180":""}`} fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7"></path>
                 </svg>
-              ) : (
-                <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                </svg>
-              )}
-              <h3 className="font-bold">{timeline.name}</h3>
+              </button>
+              <div className="flex items-center gap-2 cursor-pointer" onClick={()=>setOpen(!open)}>
+                {timeline.icon && <img src={timeline.icon} alt="" className="w-10 h-10 rounded-full" />}
+                <div>
+                  <h3 className="font-bold">{timeline.name}</h3>
+                  <div className="text-xs text-slate-500">{timeline.owner}</div>
+                </div>
+              </div>
             </div>
-            {isOwner && <button onClick={()=>toggleLock(timeline.id)} className="px-3 py-1 border rounded text-sm">{timeline.locked?"🔒 Private":"🔓 Unlocked"}</button>}
+            {isOwner && (
+              <div className="flex items-center gap-2">
+                <button onClick={()=>toggleLock(timeline.id)} className="text-sm px-3 py-2 border rounded">
+                  {timeline.locked ? "🔒 Private" : "🔓 Unlocked"}
+                </button>
+              </div>
+            )}
           </div>
           {open && (
-            <div className="mt-3 space-y-4">
+            <>
               {isOwner && (
-                <div className="space-y-2">
+                <div className="mb-3 space-y-2">
                   <textarea className="w-full border p-2 rounded" placeholder="Write something..." value={text} onChange={e=>setText(e.target.value)} />
-                  <div className="flex gap-2">
+                  <div className="flex gap-2 flex-wrap">
                     <button onClick={()=>text && handleAddPost(timeline.id,text,"text")} className="px-3 py-1 bg-slate-900 text-white rounded">Add Text</button>
                     <input type="file" onChange={e=>setFile(e.target.files[0])} />
-                    <button onClick={handleUpload} className="px-3 py-1 border rounded">Upload</button>
+                    <button onClick={()=>file && handleAddPost(timeline.id,{name:file.name,type:file.type,url:URL.createObjectURL(file)},"file")} className="px-3 py-1 border rounded">Upload</button>
                   </div>
                 </div>
               )}
-              <div className="space-y-4 border-l-2 border-slate-200 pl-4">
-                {timeline.posts.map(p=><PostCard key={p.id} p={p} isOwner={isOwner} timelineId={timeline.id} handleDeletePost={handleDeletePost}/>)}
+
+              {/* NEW: Vertical timeline style with a connecting line and dots */}
+              <div className="relative pl-8">
+                {/* vertical line */}
+                <div className="absolute left-4 top-6 bottom-0 w-0.5 bg-slate-300"></div>
+
+                <div className="space-y-6">
+                  {timeline.posts.map((p)=>(
+                    <div key={p.id} className="relative">
+                      {/* dot */}
+                      <div className="absolute -left-6 top-3 w-3 h-3 bg-slate-900 rounded-full ring-2 ring-white"></div>
+
+                      <div className="bg-white p-3 rounded-xl shadow">
+                        <div className="flex justify-between items-center mb-1 text-xs text-slate-500">
+                          <span>{p.owner} • {new Date(p.created).toLocaleString()}</span>
+                          {isOwner && <button onClick={()=>handleDeletePost(timeline.id,p.id)} className="text-red-600 text-xs">✕</button>}
+                        </div>
+                        {p.type==="text" && <div>{p.content}</div>}
+                        {p.type==="file" && (
+                          p.content.type.startsWith("image") ?
+                            <img src={p.content.url} alt="" className="w-full h-48 object-cover rounded" /> :
+                            <video src={p.content.url} controls className="w-full h-48 rounded" />
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
-            </div>
+            </>
           )}
         </div>
       )
@@ -308,91 +470,96 @@
 
     function PostCard({p,isOwner,timelineId,handleDeletePost}){
       return(
-        <div className="bg-slate-50 p-3 rounded shadow text-sm">
-          <div className="flex justify-between text-xs text-slate-500 mb-1">
-            <span>{p.owner} • {new Date(p.created).toLocaleString()}</span>
-            {isOwner && <button onClick={()=>handleDeletePost(timelineId,p.id)} className="text-red-600">✕</button>}
+        <div className="relative z-10 flex-shrink-0 min-w-[220px]">
+          <div className={`bg-white border rounded-xl p-3 shadow text-sm ${p.type==="text"?"max-w-xs":""}`}>
+            <div className="flex justify-between items-center mb-1 text-xs text-slate-500">
+              <span>{p.owner} • {new Date(p.created).toLocaleString()}</span>
+              {isOwner && <button onClick={()=>handleDeletePost(timelineId,p.id)} className="text-red-600 text-xs">✕</button>}
+            </div>
+            {p.type==="text" && <div>{p.content}</div>}
+            {p.type==="file" && (
+              p.content.type.startsWith("image") ?
+                <img src={p.content.url} alt="" className="w-full h-32 object-cover rounded"/> :
+                <video src={p.content.url} controls className="w-full h-32 rounded" />
+            )}
           </div>
-          {p.type==="text" && <div>{p.content}</div>}
-          {p.type==="file" && (
-            p.content.type.startsWith("image")
-              ? <img src={p.content.url} className="w-full rounded"/>
-              : <video src={p.content.url} controls className="w-full rounded"/>
-          )}
         </div>
       )
     }
 
-    // ---- Family ----
-    function Family({user,requestAddFamily,acceptRequest,declineRequest}){
+    // ---- Feed: shows unlocked timelines ONLY if owner is in your family or isStar ----
+    function Feed({user,timelines}){
       const users=read(USERS_KEY);
-      const pending=getPendingRequests(user.username);
+      const myFriends=getFriends(user.username);
+      const allVisible=Object.values(timelines).filter(t=>{
+        if(!t.locked) {
+          const owner = t.owner;
+          // show unlocked only if owner is family or owner is star
+          return myFriends.includes(owner) || users[owner]?.isStar;
+        }
+        return false;
+      });
       return(
         <div>
-          <h2 className="text-xl font-semibold mb-3">Family</h2>
-          <div className="mb-4">
-            <h3 className="font-semibold mb-2">Requests</h3>
-            {pending.length===0 && <div className="text-slate-500">No requests.</div>}
-            {pending.map(from=>(
-              <div key={from} className="flex justify-between items-center bg-slate-50 p-2 rounded mb-2">
-                <span>{from}{users[from]?.isStar?" ⭐":""}</span>
-                <div className="flex gap-2">
-                  <button onClick={()=>acceptRequest(from)} className="px-2 py-1 bg-green-500 text-white rounded">Accept</button>
-                  <button onClick={()=>declineRequest(from)} className="px-2 py-1 bg-red-500 text-white rounded">Decline</button>
+          <h2 className="text-xl font-semibold mb-4">Feed (Unlocked posts from family or Star members)</h2>
+          {allVisible.length===0 && <div className="text-slate-500">No unlocked posts visible to you yet.</div>}
+          <div className="grid gap-3">
+            {allVisible.map(t=> (
+              <div key={t.id} className="bg-white p-3 rounded shadow">
+                <div className="flex justify-between items-center mb-2">
+                  <div>
+                    <div className="font-bold">{t.name} <span className="text-xs text-slate-500">by {t.owner}</span></div>
+                    <div className="text-xs text-slate-400">{myFriends.includes(t.owner)?"Family":"Star"}{users[t.owner]?.isStar?" • Star":""}</div>
+                  </div>
+                </div>
+                <div className="flex gap-3 overflow-x-auto">
+                  {t.posts.map(p=>(
+                    <div key={p.id} className="min-w-[220px]">
+                      <div className="bg-slate-50 p-3 rounded">
+                        {p.type==="text"?p.content:(p.content.name)}
+                        <div className="text-xs text-slate-400 mt-2">{new Date(p.created).toLocaleString()}</div>
+                      </div>
+                    </div>
+                  ))}
                 </div>
               </div>
             ))}
           </div>
-          <div>
-            <h3 className="font-semibold mb-2">Add Family</h3>
-            <AddFamilyForm onSubmit={requestAddFamily}/>
-          </div>
         </div>
       )
     }
 
-    function AddFamilyForm({onSubmit}){
-      const [u,setU]=useState("");
-      return(
-        <form onSubmit={e=>{e.preventDefault(); if(u){onSubmit(u);setU("");}}} className="flex gap-2">
-          <input className="flex-1 p-2 border rounded" placeholder="username" value={u} onChange={e=>setU(e.target.value)} />
-          <button className="px-3 py-2 bg-slate-900 text-white rounded">Send</button>
-        </form>
-      )
-    }
-
-    // ---- Chat ----
+    // ---- Chat as its own page (optimized for phone). Show only family contacts ----
     function Chat({user,messages,sendMessage}){
       const users=read(USERS_KEY);
       const myFriends=getFriends(user.username);
-      const family=myFriends.filter(u=>u in users);
+      const family = myFriends.filter(u=>u in users);
       const [selected,setSelected]=useState(family[0]||null);
       const [text,setText]=useState("");
 
-      useEffect(()=>{ if(!selected && family[0]) setSelected(family[0]); },[family]);
-
-      const conversation=(messages[user.username]?.[selected])||[];
+      useEffect(()=>{
+        if(!selected && family[0]) setSelected(family[0]);
+      },[family]);
 
       return(
         <div className="flex flex-col sm:flex-row gap-4">
           <aside className="w-full sm:w-48 bg-white rounded shadow p-2 max-h-[60vh] overflow-y-auto">
             <h4 className="font-semibold mb-2">Family Contacts</h4>
-            {family.length===0 && <div className="text-slate-500">No family contacts.</div>}
-            {family.map(o=>(
-              <div key={o} className={`p-3 rounded cursor-pointer ${selected===o?"bg-slate-100":""}`} onClick={()=>setSelected(o)}>
-                {o}{users[o]?.isStar?" ⭐":""}
+            {family.length===0 && <div className="text-slate-500">No family contacts. Add family from the Family tab.</div>}
+            {family.map(o=>( 
+              <div key={o} className={`p-3 rounded cursor-pointer flex items-center justify-between ${selected===o?"bg-slate-100":""}`} onClick={()=>setSelected(o)}>
+                <div>{o}{users[o]?.isStar?" ⭐":""}</div>
               </div>
             ))}
           </aside>
+
           <section className="flex-1 bg-white rounded shadow p-3 flex flex-col">
             {selected ? (
               <>
                 <div className="flex-1 overflow-y-auto mb-2 max-h-[60vh]">
-                  {conversation.map((m,i)=>(
+                  {((messages[selected]||[]) || []).map((m,i)=>( // show conversation with selected
                     <div key={i} className={`mb-2 ${m.from===selected?"text-left":"text-right"}`}>
-                      <div className="inline-block px-3 py-1 rounded text-sm bg-slate-100">
-                        {m.from}: {m.text}
-                      </div>
+                      <div className="inline-block px-3 py-1 rounded text-sm bg-slate-100">{m.from}: {m.text}</div>
                     </div>
                   ))}
                 </div>
@@ -401,8 +568,90 @@
                   <button className="px-4 py-2 bg-slate-900 text-white rounded">Send</button>
                 </form>
               </>
-            ): <div className="text-slate-500">No family selected</div>}
+            ) : <div className="text-slate-500">No family selected</div>}
           </section>
+        </div>
+      )
+    }
+
+    // ---- Family (uses friends list). Chat removed from Family page per request. ----
+    function Family({user,timelines,messages,requestAddFamily}){
+      const users=read(USERS_KEY);
+      const myFriends=getFriends(user.username);
+      const [search,setSearch]=useState("");
+      const others=Object.keys(users).filter(u=>u!==user.username && u.includes(search));
+
+      function add(u){ try{ requestAddFamily(u); }catch(e){ alert(e.message); } }
+
+      return(
+        <div>
+          <h2 className="text-xl font-semibold mb-4">Family</h2>
+          <input className="w-full border p-3 rounded mb-4" placeholder="Search users..." value={search} onChange={e=>setSearch(e.target.value)} />
+
+          <ul className="space-y-2 mb-6">
+            {others.map(u=><li key={u} className="bg-white p-3 rounded shadow flex justify-between items-center">
+              <div>
+                <div className="font-medium">{u}{users[u]?.isStar?" ⭐":""}</div>
+                <div className="text-xs text-slate-500">{users[u]?.pendingRequests?.includes(user.username) ? "Request sent" : ""}</div>
+              </div>
+              <div className="flex gap-2">
+                <button onClick={()=>add(u)} className="px-3 py-1 border rounded">{ users[u]?.pendingRequests?.includes(user.username) ? "Requested" : "Add Family" }</button>
+              </div>
+            </li>)}
+          </ul>
+
+          <h3 className="font-bold mb-2">Your Family</h3>
+          {myFriends.length===0 && <div className="text-slate-500">No family yet.</div>}
+          {myFriends.map(f=> <FamilyMember key={f} me={user.username} friend={f} timelines={timelines} messages={messages?.[user.username]?.[f]||[]} />)}
+        </div>
+      )
+    }
+
+    // helper to avoid lint confusion in template above
+    function meOrUser(u){ return u }
+
+    function FamilyMember({me,friend,timelines,messages}){
+      const friendTimelines=Object.values(timelines).filter(t=>t.owner===friend && !t.locked);
+      return(
+        <div className="mb-6">
+          <h4 className="font-semibold mb-2">{friend}'s Timelines</h4>
+          {friendTimelines.length===0 && <div className="text-slate-500 mb-4">No visible timelines.</div>}
+          {friendTimelines.map(tl=> <Timeline key={tl.id} timeline={tl} isOwner={false} />)}
+          {/* Chat removed from family page by request */}
+        </div>
+      )
+    }
+
+    // ---- Memory Lane ----
+    function MemoryLane({user,timelines}){
+      const today=new Date();
+      const memories=[];
+      Object.values(timelines).forEach(t=>{
+        t.posts?.forEach(p=>{
+          const d=new Date(p.created);
+          if(d.getDate()===today.getDate() && d.getMonth()===today.getMonth()) memories.push({...p,timeline:t.name});
+        })
+      });
+      return(
+        <div>
+          <h2 className="text-xl font-semibold mb-4">Memory Lane</h2>
+          {memories.length===0 && <div className="text-slate-500">No memories today.</div>}
+          {memories.map((m,i)=>( 
+            <div key={i} className="bg-white p-3 rounded shadow mb-2">
+              <div className="text-xs text-slate-500">From {m.timeline}</div>
+              <div>{m.type==="text"?m.content:m.content.name}</div>
+            </div>
+          ))}
+        </div>
+      )
+    }
+
+    // ---- Shop Page ----
+    function Shop(){
+      return (
+        <div className="bg-white p-6 rounded shadow text-center">
+          <h2 className="text-xl font-semibold mb-3">Shop</h2>
+          <div className="text-slate-500">to come...</div>
         </div>
       )
     }
@@ -411,4 +660,5 @@
   </script>
 </body>
 </html>
+
 
