@@ -1,171 +1,348 @@
+<h1>made by leo</h1>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Moments</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-slate-100">
+<div id="root"></div>
+
 <script type="text/babel">
+const { useState, useEffect, useRef } = React;
+const uid = () => Math.random().toString(36).slice(2,9);
 
-// --- STORAGE HELPERS ---
-const USERS_KEY="moments_users";
-const TIMELINES_KEY="moments_timelines";
-const MESSAGES_KEY="moments_messages";
-const SESSION_KEY="moments_session";
+const USERS_KEY = "moments_users";
+const SESSION_KEY = "moments_session";
+const TIMELINES_KEY = "moments_timelines";
+const MESSAGES_KEY = "moments_messages";
 
-function read(key){ return JSON.parse(localStorage.getItem(key)||"[]"); }
+function read(key){ try{return JSON.parse(localStorage.getItem(key))||{}}catch{return{}} }
 function write(key,val){ localStorage.setItem(key,JSON.stringify(val)); }
 
-function currentSession(){
-  return JSON.parse(localStorage.getItem(SESSION_KEY)||"null");
+// ---- Auth ----
+function createAccount(username,password,isInfluencer=false){
+  const users=read(USERS_KEY);
+  if(users[username]) throw new Error("username taken");
+  users[username]={username,password,id:uid(),friends:[],isInfluencer};
+  write(USERS_KEY,users);
 }
-function setSession(user){
-  localStorage.setItem(SESSION_KEY,JSON.stringify({username:user.username}));
+function signIn(username,password){
+  const users=read(USERS_KEY);
+  if(!users[username]) throw new Error("no such user");
+  if(users[username].password!==password) throw new Error("wrong password");
+  write(SESSION_KEY,{username});
+  return users[username];
 }
 function signOut(){ localStorage.removeItem(SESSION_KEY); }
+function currentSession(){ return read(SESSION_KEY); }
 
-// --- AUTH ---
-function register(username,password,isInfluencer=false){
-  const users = JSON.parse(localStorage.getItem(USERS_KEY)||"{}");
-  if(users[username]) return false;
-  users[username] = {username,password,isInfluencer};
-  localStorage.setItem(USERS_KEY,JSON.stringify(users));
-  return true;
-}
-function login(username,password){
-  const users = JSON.parse(localStorage.getItem(USERS_KEY)||"{}");
-  if(users[username] && users[username].password===password){
-    return users[username];
+function addFriend(user,friend){
+  const users=read(USERS_KEY);
+  if(!users[user].friends.includes(friend)){
+    users[user].friends.push(friend);
+    write(USERS_KEY,users);
   }
-  return null;
 }
+function getFriends(user){ const users=read(USERS_KEY); return users[user]?.friends||[]; }
 
-// --- COMPONENTS ---
-function Register({setUser}){
-  const [u,setU]=React.useState("");
-  const [p,setP]=React.useState("");
-  const [isInfluencer,setIsInfluencer]=React.useState(false);
-
-  return (
-    <form onSubmit={e=>{
-      e.preventDefault();
-      if(register(u,p,isInfluencer)){
-        const user={username:u,isInfluencer};
-        setUser(user);
-        setSession(user);
-      } else alert("Username exists");
-    }} className="flex flex-col gap-2 p-4">
-      <input placeholder="username" value={u} onChange={e=>setU(e.target.value)} className="border p-1"/>
-      <input type="password" placeholder="password" value={p} onChange={e=>setP(e.target.value)} className="border p-1"/>
-      <label className="flex items-center gap-2">
-        <input type="checkbox" checked={isInfluencer} onChange={e=>setIsInfluencer(e.target.checked)} />
-        Influencer Account
-      </label>
-      <button className="px-3 py-1 bg-green-500 text-white rounded">Register</button>
-    </form>
-  );
-}
-
-function Login({setUser}){
-  const [u,setU]=React.useState("");
-  const [p,setP]=React.useState("");
-  return (
-    <form onSubmit={e=>{
-      e.preventDefault();
-      const res=login(u,p);
-      if(res){ setUser(res); setSession(res); }
-      else alert("Wrong credentials");
-    }} className="flex flex-col gap-2 p-4">
-      <input placeholder="username" value={u} onChange={e=>setU(e.target.value)} className="border p-1"/>
-      <input type="password" placeholder="password" value={p} onChange={e=>setP(e.target.value)} className="border p-1"/>
-      <button className="px-3 py-1 bg-blue-500 text-white rounded">Login</button>
-    </form>
-  );
-}
-
-// --- FEED ---
-function Feed(){
-  const [influencers,setInfluencers]=React.useState([]);
-  const [timelineIndex,setTimelineIndex]=React.useState(0);
-  const [postIndex,setPostIndex]=React.useState(0);
-
-  React.useEffect(()=>{
-    const users = JSON.parse(localStorage.getItem(USERS_KEY)||"{}");
-    const tls = read(TIMELINES_KEY);
-    const inflUsers = Object.values(users).filter(u=>u.isInfluencer);
-    const inflTimelines = inflUsers.map(u=>({
-      user:u.username,
-      posts: tls.filter(t=>t.user===u.username)
-    }));
-    setInfluencers(inflTimelines);
-  },[]);
-
-  if(!influencers.length) return <div className="p-4">No influencer posts yet.</div>;
-
-  const current = influencers[timelineIndex];
-  const posts = current.posts;
-  const post = posts[postIndex];
-
-  return (
-    <div className="h-screen flex flex-col justify-center items-center text-center">
-      <h2 className="text-xl font-bold mb-2">{current.user}</h2>
-      {post ? (
-        <div className="p-4 border rounded shadow w-80">
-          <h3 className="font-semibold">{post.title}</h3>
-          <p>{post.text}</p>
-        </div>
-      ):<div>No posts</div>}
-
-      <div className="mt-4 flex gap-4">
-        <button onClick={()=>setPostIndex(i=>Math.max(0,i-1))}>⬅ Prev</button>
-        <button onClick={()=>setPostIndex(i=>Math.min(posts.length-1,i+1))}>Next ➡</button>
-      </div>
-      <div className="mt-2 flex gap-4">
-        <button onClick={()=>{
-          setTimelineIndex(i=>Math.max(0,i-1));
-          setPostIndex(0);
-        }}>⬆ Prev Influencer</button>
-        <button onClick={()=>{
-          setTimelineIndex(i=>Math.min(influencers.length-1,i+1));
-          setPostIndex(0);
-        }}>Next Influencer ⬇</button>
-      </div>
-    </div>
-  );
-}
-
-// --- APP ---
+// ---- App ----
 function MomentsApp(){
-  const [user,setUser]=React.useState(null);
-  const [view,setView]=React.useState("timelines");
+  const [user,setUser]=useState(null);
+  const [view,setView]=useState("feed"); // default view is feed
+  const [timelines,setTimelines]=useState(read(TIMELINES_KEY));
+  const [messages,setMessages]=useState(read(MESSAGES_KEY));
+  const channelRef=useRef(null);
 
-  // restore session
-  React.useEffect(()=>{
+  useEffect(()=>{
     const session=currentSession();
     if(session?.username){
-      const users=JSON.parse(localStorage.getItem(USERS_KEY)||"{}");
+      const users=read(USERS_KEY);
       if(users[session.username]){
         setUser(users[session.username]);
       }
     }
   },[]);
 
-  if(!user) return (
-    <div>
-      <h1 className="text-2xl font-bold p-4">Moments</h1>
-      <Login setUser={setUser}/>
-      <Register setUser={setUser}/>
-    </div>
-  );
+  useEffect(()=>{
+    channelRef.current=new BroadcastChannel("moments_channel");
+    channelRef.current.onmessage=(e)=>{
+      if(e.data.type==="message"){
+        setMessages(prev=>{
+          const m={...prev};
+          if(!m[e.data.to]) m[e.data.to]={};
+          if(!m[e.data.to][e.data.from]) m[e.data.to][e.data.from]=[];
+          m[e.data.to][e.data.from].push(e.data.msg);
+          write(MESSAGES_KEY,m);
+          return m;
+        });
+      }
+    };
+    return ()=>channelRef.current.close();
+  },[]);
 
-  return (
-    <div>
-      <div className="flex gap-2 p-2 border-b">
-        <button onClick={()=>setView("timelines")}>Timelines</button>
-        <button onClick={()=>setView("chats")}>Chats</button>
-        <button onClick={()=>setView("feed")}>Feed</button>
-        <button onClick={()=>{signOut();setUser(null)}}>Sign out</button>
-      </div>
-      {view==="timelines" && <div>/* your timelines code here */</div>}
-      {view==="chats" && <div>/* your chats code here */</div>}
-      {view==="feed" && <Feed />}
+  function handleCreateTimeline(name,iconFile){
+    const reader=new FileReader();
+    reader.onload=()=>{
+      const newT={id:uid(),name,owner:user.username,posts:[],locked:false,icon:reader.result};
+      const updated={...timelines,[newT.id]:newT};
+      setTimelines(updated); write(TIMELINES_KEY,updated);
+    };
+    if(iconFile){reader.readAsDataURL(iconFile);}
+    else{
+      const newT={id:uid(),name,owner:user.username,posts:[],locked:false,icon:null};
+      const updated={...timelines,[newT.id]:newT};
+      setTimelines(updated); write(TIMELINES_KEY,updated);
+    }
+  }
+
+  function handleAddPost(tid,content,type){
+    const t={...timelines[tid]};
+    t.posts.push({id:uid(),owner:user.username,type,content,created:Date.now(),comments:[]});
+    const updated={...timelines,[tid]:t};
+    setTimelines(updated); write(TIMELINES_KEY,updated);
+  }
+
+  function handleDeletePost(tid,pid){
+    const t={...timelines[tid], posts: timelines[tid].posts.filter(p=>p.id!==pid)};
+    const updated={...timelines,[tid]:t};
+    setTimelines(updated); write(TIMELINES_KEY,updated);
+  }
+
+  function toggleLock(tid){
+    const t={...timelines[tid]};
+    t.locked=!t.locked;
+    const updated={...timelines,[tid]:t};
+    setTimelines(updated); write(TIMELINES_KEY,updated);
+  }
+
+  function sendMessage(to,msg){
+    const m={from:user.username,to,msg,time:Date.now()};
+    const all={...messages};
+    if(!all[user.username]) all[user.username]={};
+    if(!all[user.username][to]) all[user.username][to]=[];
+    all[user.username][to].push(m);
+    if(!all[to]) all[to]={};
+    if(!all[to][user.username]) all[to][user.username]=[];
+    all[to][user.username].push(m);
+    setMessages(all); write(MESSAGES_KEY,all);
+    channelRef.current.postMessage({type:"message",to,from:user.username,msg});
+  }
+
+  return user
+    ? <Dashboard user={user} setUser={setUser} view={view} setView={setView} timelines={timelines} setTimelines={setTimelines} messages={messages} sendMessage={sendMessage} handleCreateTimeline={handleCreateTimeline} handleAddPost={handleAddPost} handleDeletePost={handleDeletePost} toggleLock={toggleLock} />
+    : <AuthPanel setUser={setUser} />;
+}
+
+// ---- Auth Panel with Influencer Option ----
+function AuthPanel({setUser}){
+  const [mode,setMode]=useState("signin");
+  const [u,setU]=useState(""),[p,setP]=useState(""),[err,setErr]=useState("");
+  const [isInfluencer,setIsInfluencer]=useState(false);
+
+  function submit(e){ e.preventDefault();
+    try{
+      if(mode==="signup") createAccount(u,p,isInfluencer);
+      signIn(u,p);
+      setUser(currentSession());
+    }catch(e){setErr(e.message);}
+  }
+
+  return(
+    <div className="p-6 bg-white rounded-xl shadow max-w-md mx-auto mt-20 relative">
+      <h2 className="text-xl font-bold mb-3">{mode==="signin"?"Sign In":"Create Account"}</h2>
+      <form onSubmit={submit} className="space-y-2">
+        <input className="w-full p-2 border rounded" placeholder="username" value={u} onChange={e=>setU(e.target.value)} />
+        <input className="w-full p-2 border rounded" placeholder="password" type="password" value={p} onChange={e=>setP(e.target.value)} />
+        {err && <div className="text-red-600 text-sm">{err}</div>}
+        <button className="w-full px-3 py-2 bg-slate-900 text-white rounded">{mode==="signin"?"Sign in":"Sign up"}</button>
+      </form>
+      {mode==="signup" && (
+        <label className="absolute bottom-4 left-4 flex items-center">
+          <input type="checkbox" className="mr-2" checked={isInfluencer} onChange={e=>setIsInfluencer(e.target.checked)} />
+          Create Influencer Account
+        </label>
+      )}
+      <button onClick={()=>setMode(mode==="signin"?"signup":"signin")} className="w-full mt-3 px-3 py-2 border rounded">{mode==="signin"?"Need an account? Sign up":"Have an account? Sign in"}</button>
     </div>
-  );
+  )
+}
+
+// ---- Dashboard ----
+function Dashboard({user,setUser,view,setView,timelines,messages,sendMessage,handleCreateTimeline,handleAddPost,handleDeletePost,toggleLock}){
+  return(
+    <div className="p-4 max-w-5xl mx-auto">
+      <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center mb-6 gap-3">
+        <h1 className="text-2xl font-bold">Moments</h1>
+        <div className="flex gap-3 items-center">
+          <div>Hello, <b>{user.username}</b></div>
+          <button onClick={()=>{signOut();setUser(null)}} className="px-2 py-1 border rounded">Sign out</button>
+        </div>
+      </div>
+      <div className="flex sm:gap-6 flex-col sm:flex-row">
+        <div className="flex sm:flex-col gap-2 sm:w-40 w-full mb-4 sm:mb-0">
+          <button onClick={()=>setView("feed")} className={`px-3 py-2 rounded ${view==="feed"?"bg-slate-900 text-white":"border"}`}>Feed</button>
+          <button onClick={()=>setView("timelines")} className={`px-3 py-2 rounded ${view==="timelines"?"bg-slate-900 text-white":"border"}`}>Your Timelines</button>
+          <button onClick={()=>setView("messages")} className={`px-3 py-2 rounded ${view==="messages"?"bg-slate-900 text-white":"border"}`}>Messages</button>
+        </div>
+        <div className="flex-1">
+          {view==="feed" && <Feed user={user} timelines={timelines} />}
+          {view==="timelines" && <Timelines user={user} timelines={timelines} handleCreateTimeline={handleCreateTimeline} handleAddPost={handleAddPost} handleDeletePost={handleDeletePost} toggleLock={toggleLock} />}
+          {view==="messages" && <MessagesPage user={user} messages={messages} sendMessage={sendMessage} />}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ---- Feed (Public + Friends) ----
+function Feed({user,timelines}){
+  const users=read(USERS_KEY);
+  const myFriends=getFriends(user.username);
+  const feedTimelines=Object.values(timelines).filter(t=>!t.locked && (myFriends.includes(t.owner) || users[t.owner]?.isInfluencer));
+
+  return(
+    <div>
+      <h2 className="text-xl font-semibold mb-4">Feed</h2>
+      {feedTimelines.length===0 && <div className="text-slate-500">No posts yet.</div>}
+      {feedTimelines.map(t=><Timeline key={t.id} timeline={t} isOwner={t.owner===user.username} />)}
+    </div>
+  )
+}
+
+// ---- Messages Page ----
+function MessagesPage({user,messages,sendMessage}){
+  const [selected,setSelected]=useState(null);
+  const [msg,setMsg]=useState("");
+  const users=read(USERS_KEY);
+  const others=Object.keys(users).filter(u=>u!==user.username);
+
+  return(
+    <div className="flex gap-4">
+      <div className="w-40 bg-white p-2 rounded shadow">
+        <h3 className="font-semibold mb-2">Users</h3>
+        {others.map(u=><div key={u} className={`p-2 rounded cursor-pointer ${selected===u?"bg-slate-200":""}`} onClick={()=>setSelected(u)}>{u}</div>)}
+      </div>
+      <div className="flex-1 flex flex-col">
+        {selected ? (
+          <>
+            <div className="flex-1 bg-white rounded shadow p-2 overflow-y-auto max-h-96 mb-2">
+              {(messages[user.username]?.[selected]||[]).map((m,i)=><div key={i} className={`mb-1 ${m.from===selected?"text-left":"text-right"}`}><span className="inline-block px-2 py-1 rounded text-sm bg-slate-200">{m.from}: {typeof m.msg==="string"?m.msg:(m.msg.name)}</span></div>)}
+            </div>
+            <form className="flex gap-2" onSubmit={e=>{e.preventDefault(); if(msg){sendMessage(selected,msg); setMsg("");}}}>
+              <input className="flex-1 border rounded p-2" placeholder="Type a message..." value={msg} onChange={e=>setMsg(e.target.value)} />
+              <button className="px-3 py-1 bg-slate-900 text-white rounded">Send</button>
+            </form>
+          </>
+        ) : <div className="text-slate-500 p-4">Select a user to chat</div>}
+      </div>
+    </div>
+  )
+}
+
+// ---- Timelines & Posts with Comments ----
+function Timelines({user,timelines,handleCreateTimeline,handleAddPost,handleDeletePost,toggleLock}){
+  const [name,setName]=useState("");
+  const [iconFile,setIconFile]=useState(null);
+  const myT=Object.values(timelines).filter(t=>t.owner===user.username);
+
+  return(
+    <div>
+      <h2 className="text-xl font-semibold mb-4">Your Timelines</h2>
+      <div className="flex flex-col sm:flex-row gap-2 mb-4">
+        <input className="flex-1 p-2 border rounded" placeholder="New timeline name" value={name} onChange={e=>setName(e.target.value)} />
+        <input type="file" accept="image/*" onChange={e=>setIconFile(e.target.files[0])} />
+        <button onClick={()=>{if(name){handleCreateTimeline(name,iconFile);setName("");setIconFile(null);}}} className="px-3 py-1 bg-slate-900 text-white rounded">Create</button>
+      </div>
+      <div className="grid gap-4">
+        {myT.map(t=><Timeline key={t.id} timeline={t} isOwner handleAddPost={handleAddPost} handleDeletePost={handleDeletePost} toggleLock={toggleLock} />)}
+      </div>
+    </div>
+  )
+}
+
+function Timeline({timeline,isOwner,handleAddPost,handleDeletePost,toggleLock}){
+  const [text,setText]=useState("");
+  const [file,setFile]=useState(null);
+  const [open,setOpen]=useState(false);
+
+  return(
+    <div className="bg-white p-4 rounded-xl shadow mb-4">
+      <div className="flex justify-between items-center mb-2">
+        <div className="flex items-center gap-2 cursor-pointer" onClick={()=>setOpen(!open)}>
+          {timeline.icon && <img src={timeline.icon} alt="" className="w-6 h-6 rounded-full" />}
+          <h3 className="font-bold">{timeline.name}</h3>
+          <span className="text-sm text-slate-500">{open?"▲":"▼"}</span>
+        </div>
+        {isOwner && <button onClick={()=>toggleLock(timeline.id)} className="text-sm px-2 py-1 border rounded">{timeline.locked?"🔒":"🔓"}</button>}
+      </div>
+      {open && (
+        <>
+          {isOwner && (
+            <div className="mb-3 space-y-2">
+              <textarea className="w-full border p-2 rounded" placeholder="Write something..." value={text} onChange={e=>setText(e.target.value)} />
+              <div className="flex gap-2 flex-wrap">
+                <button onClick={()=>text && handleAddPost(timeline.id,text,"text")} className="px-3 py-1 bg-slate-900 text-white rounded">Add Text</button>
+                <input type="file" onChange={e=>setFile(e.target.files[0])} />
+                <button onClick={()=>file && handleAddPost(timeline.id,{name:file.name,type:file.type,url:URL.createObjectURL(file)},"file")} className="px-3 py-1 border rounded">Upload</button>
+              </div>
+            </div>
+          )}
+          <div className="flex gap-6 overflow-x-auto pb-4">
+            {timeline.posts.map((p)=><PostCard key={p.id} p={p} isOwner={isOwner} timelineId={timeline.id} handleDeletePost={handleDeletePost} />)}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+function PostCard({p,isOwner,timelineId,handleDeletePost}){
+  const [comment,setComment]=useState("");
+  const [showComments,setShowComments]=useState(false);
+
+  const addComment=()=>{
+    if(comment){
+      p.comments.push({user:"You",text:comment});
+      setComment("");
+    }
+  }
+
+  const embedYoutube=(text)=>{
+    const match=text.match(/(?:https?:\/\/)?(?:www\.)?youtube\.com\/watch\?v=([\w-]+)/);
+    return match ? <iframe width="200" height="120" src={`https://www.youtube.com/embed/${match[1]}`} frameBorder="0" allowFullScreen></iframe> : text;
+  }
+
+  return(
+    <div className="relative z-10 flex-shrink-0 min-w-[220px]">
+      <div className="bg-white border rounded-xl p-3 shadow text-sm">
+        <div className="flex justify-between items-center mb-1 text-xs text-slate-500">
+          <span>{p.owner} • {new Date(p.created).toLocaleString()}</span>
+          {isOwner && <button onClick={()=>handleDeletePost(timelineId,p.id)} className="text-red-600 text-xs">✕</button>}
+        </div>
+        {p.type==="text" && <div>{embedYoutube(p.content)}</div>}
+        {p.type==="file" && (p.content.type.startsWith("image") ? <img src={p.content.url} alt="" className="w-full h-32 object-cover rounded"/> : <video src={p.content.url} controls className="w-full h-32 rounded" />)}
+        <button className="text-xs text-blue-600 mt-1" onClick={()=>setShowComments(!showComments)}>{showComments?"Hide Comments":"Comments"}</button>
+        {showComments && (
+          <div className="mt-1">
+            {p.comments.map((c,i)=><div key={i} className="text-xs border-t pt-1">{c.user}: {c.text}</div>)}
+            <div className="flex gap-1 mt-1">
+              <input className="flex-1 border p-1 text-xs" placeholder="Add comment" value={comment} onChange={e=>setComment(e.target.value)} />
+              <button className="px-2 py-1 text-xs bg-slate-900 text-white rounded" onClick={addComment}>Add</button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(<MomentsApp/>);
-
 </script>
+</body>
+</html>
