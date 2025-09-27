@@ -1,0 +1,171 @@
+<script type="text/babel">
+
+// --- STORAGE HELPERS ---
+const USERS_KEY="moments_users";
+const TIMELINES_KEY="moments_timelines";
+const MESSAGES_KEY="moments_messages";
+const SESSION_KEY="moments_session";
+
+function read(key){ return JSON.parse(localStorage.getItem(key)||"[]"); }
+function write(key,val){ localStorage.setItem(key,JSON.stringify(val)); }
+
+function currentSession(){
+  return JSON.parse(localStorage.getItem(SESSION_KEY)||"null");
+}
+function setSession(user){
+  localStorage.setItem(SESSION_KEY,JSON.stringify({username:user.username}));
+}
+function signOut(){ localStorage.removeItem(SESSION_KEY); }
+
+// --- AUTH ---
+function register(username,password,isInfluencer=false){
+  const users = JSON.parse(localStorage.getItem(USERS_KEY)||"{}");
+  if(users[username]) return false;
+  users[username] = {username,password,isInfluencer};
+  localStorage.setItem(USERS_KEY,JSON.stringify(users));
+  return true;
+}
+function login(username,password){
+  const users = JSON.parse(localStorage.getItem(USERS_KEY)||"{}");
+  if(users[username] && users[username].password===password){
+    return users[username];
+  }
+  return null;
+}
+
+// --- COMPONENTS ---
+function Register({setUser}){
+  const [u,setU]=React.useState("");
+  const [p,setP]=React.useState("");
+  const [isInfluencer,setIsInfluencer]=React.useState(false);
+
+  return (
+    <form onSubmit={e=>{
+      e.preventDefault();
+      if(register(u,p,isInfluencer)){
+        const user={username:u,isInfluencer};
+        setUser(user);
+        setSession(user);
+      } else alert("Username exists");
+    }} className="flex flex-col gap-2 p-4">
+      <input placeholder="username" value={u} onChange={e=>setU(e.target.value)} className="border p-1"/>
+      <input type="password" placeholder="password" value={p} onChange={e=>setP(e.target.value)} className="border p-1"/>
+      <label className="flex items-center gap-2">
+        <input type="checkbox" checked={isInfluencer} onChange={e=>setIsInfluencer(e.target.checked)} />
+        Influencer Account
+      </label>
+      <button className="px-3 py-1 bg-green-500 text-white rounded">Register</button>
+    </form>
+  );
+}
+
+function Login({setUser}){
+  const [u,setU]=React.useState("");
+  const [p,setP]=React.useState("");
+  return (
+    <form onSubmit={e=>{
+      e.preventDefault();
+      const res=login(u,p);
+      if(res){ setUser(res); setSession(res); }
+      else alert("Wrong credentials");
+    }} className="flex flex-col gap-2 p-4">
+      <input placeholder="username" value={u} onChange={e=>setU(e.target.value)} className="border p-1"/>
+      <input type="password" placeholder="password" value={p} onChange={e=>setP(e.target.value)} className="border p-1"/>
+      <button className="px-3 py-1 bg-blue-500 text-white rounded">Login</button>
+    </form>
+  );
+}
+
+// --- FEED ---
+function Feed(){
+  const [influencers,setInfluencers]=React.useState([]);
+  const [timelineIndex,setTimelineIndex]=React.useState(0);
+  const [postIndex,setPostIndex]=React.useState(0);
+
+  React.useEffect(()=>{
+    const users = JSON.parse(localStorage.getItem(USERS_KEY)||"{}");
+    const tls = read(TIMELINES_KEY);
+    const inflUsers = Object.values(users).filter(u=>u.isInfluencer);
+    const inflTimelines = inflUsers.map(u=>({
+      user:u.username,
+      posts: tls.filter(t=>t.user===u.username)
+    }));
+    setInfluencers(inflTimelines);
+  },[]);
+
+  if(!influencers.length) return <div className="p-4">No influencer posts yet.</div>;
+
+  const current = influencers[timelineIndex];
+  const posts = current.posts;
+  const post = posts[postIndex];
+
+  return (
+    <div className="h-screen flex flex-col justify-center items-center text-center">
+      <h2 className="text-xl font-bold mb-2">{current.user}</h2>
+      {post ? (
+        <div className="p-4 border rounded shadow w-80">
+          <h3 className="font-semibold">{post.title}</h3>
+          <p>{post.text}</p>
+        </div>
+      ):<div>No posts</div>}
+
+      <div className="mt-4 flex gap-4">
+        <button onClick={()=>setPostIndex(i=>Math.max(0,i-1))}>⬅ Prev</button>
+        <button onClick={()=>setPostIndex(i=>Math.min(posts.length-1,i+1))}>Next ➡</button>
+      </div>
+      <div className="mt-2 flex gap-4">
+        <button onClick={()=>{
+          setTimelineIndex(i=>Math.max(0,i-1));
+          setPostIndex(0);
+        }}>⬆ Prev Influencer</button>
+        <button onClick={()=>{
+          setTimelineIndex(i=>Math.min(influencers.length-1,i+1));
+          setPostIndex(0);
+        }}>Next Influencer ⬇</button>
+      </div>
+    </div>
+  );
+}
+
+// --- APP ---
+function MomentsApp(){
+  const [user,setUser]=React.useState(null);
+  const [view,setView]=React.useState("timelines");
+
+  // restore session
+  React.useEffect(()=>{
+    const session=currentSession();
+    if(session?.username){
+      const users=JSON.parse(localStorage.getItem(USERS_KEY)||"{}");
+      if(users[session.username]){
+        setUser(users[session.username]);
+      }
+    }
+  },[]);
+
+  if(!user) return (
+    <div>
+      <h1 className="text-2xl font-bold p-4">Moments</h1>
+      <Login setUser={setUser}/>
+      <Register setUser={setUser}/>
+    </div>
+  );
+
+  return (
+    <div>
+      <div className="flex gap-2 p-2 border-b">
+        <button onClick={()=>setView("timelines")}>Timelines</button>
+        <button onClick={()=>setView("chats")}>Chats</button>
+        <button onClick={()=>setView("feed")}>Feed</button>
+        <button onClick={()=>{signOut();setUser(null)}}>Sign out</button>
+      </div>
+      {view==="timelines" && <div>/* your timelines code here */</div>}
+      {view==="chats" && <div>/* your chats code here */</div>}
+      {view==="feed" && <Feed />}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<MomentsApp/>);
+
+</script>
